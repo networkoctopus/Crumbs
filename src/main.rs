@@ -7,4 +7,3 @@ fn main() -> gtk::glib::ExitCode {
 fn main() {
     eprintln!("Crumbs was built without its graphical interface");
 }
-

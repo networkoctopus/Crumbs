@@ -18,10 +18,22 @@ finish-args:
   - --socket=fallback-x11
   - --share=ipc
   - --filesystem=home:ro
+  - --filesystem=xdg-download
   - --filesystem=~/.var/app:ro
   - --system-talk-name=org.freedesktop.UPower
 
 modules:
+  - name: proxmox-backup-client
+    buildsystem: simple
+    build-commands:
+      - ar x proxmox-backup-client-static_4.2.3-1_amd64.deb
+      - tar -xf data.tar.*
+      - install -Dm755 usr/bin/proxmox-backup-client /app/bin/proxmox-backup-client
+    sources:
+      - type: file
+        url: http://download.proxmox.com/debian/pbs-client/dists/trixie/main/binary-amd64/proxmox-backup-client-static_4.2.3-1_amd64.deb
+        sha256: 05ac991e89a6e899d3f236c15d13ba736221a44f138314f42cac22867ae46d55
+
   - name: crumbs
     buildsystem: simple
     build-commands:
