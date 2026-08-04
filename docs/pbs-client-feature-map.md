@@ -58,17 +58,24 @@ Status legend:
    - Later: add AppStream/metainfo and validate appstream/desktop/icon metadata.
 
 6. Setup UI: Partial
-   - Done: first libadwaita form captures repository, password, fingerprint, source folder, backup ID, archive name, and exclusions.
-   - Done: backup source can be selected with a GTK folder picker instead of manual path entry.
-   - Done: Check Connection validates PBS access through the bundled client.
-   - Next: save non-secret profile fields through profile persistence.
+   - Done: first libadwaita form captures server, password, fingerprint, source folder, backup ID, archive name, and exclusions.
+   - Done: backup and restore folders can be selected with GTK folder pickers instead of manual path entry.
+   - Done: Check Server validates PBS access through the bundled client.
+   - Done: the home screen is organized around PBS-shaped Servers, Backups, and Restore sections.
+   - Done: the home screen uses Pika-inspired overview rows with icons and backup/server previews.
+   - Done: Add Server opens a modal setup flow instead of expanding fields on the home page.
+   - Done: named servers can be added to the in-session server list, shown on the home page, and selected from Backup or Restore.
+   - Done: Backup targets open a detail view with Backup and Schedule tabs.
+   - Done: backup settings can be saved in-session so additional backup rows appear on the home page.
+   - Next: save non-secret server and backup fields through profile persistence.
    - Next: add Secret Service persistence for credentials.
    - Later: expand setup into a proper guided Pika/Deja Dup-style flow with namespace, encryption, and retention controls.
 
 7. Manual backup UI: Partial
    - Done: first GUI provides Check Connection, Estimate, Dry Run, Back Up Now, and details.
+   - Done: Backup controls now live in a dedicated Backup tab with server, source, archive, and exclusion groups.
    - Done: dry run and backup use metadata change detection and server-managed retention.
-   - Done: raw PBS output is tucked into Details while the main view shows compact status, progress, processed/uploaded amounts, and warnings.
+   - Done: raw PBS output is tucked into Details in the Backup tab while the main view shows compact status, progress, processed/uploaded amounts, and warnings.
    - Next: show last backup status and profile overview.
    - Next: run client-managed prune after successful backup when enabled.
 
@@ -76,13 +83,17 @@ Status legend:
    - Done: command specs and real PBS restore tests exist.
    - Done: snapshot list and snapshot file parsers are covered by local tests.
    - Done: first GUI slice lists snapshots, lists restorable pxar archives, accepts a restore destination, and restores all or selected paths.
+   - Done: restore now combines server selection, snapshot browsing, archive selection, destination selection, and restore execution in one Restore page.
    - Done: restore destination can be selected with a GTK folder picker so Flatpak can grant the chosen output folder.
+   - Done: restore has its own activity/progress/details section.
+   - Done: archives refresh automatically when snapshots load or the selected snapshot changes, without success-toast spam or Activity panel noise.
    - Next: verify portal-granted restore destinations across host folders and document any sandbox limits.
    - Next: replace free-text restore patterns with a browsable snapshot file/tree picker.
    - Next: surface restore failures and warnings in a friendlier summary.
    - Later: add encrypted/keyfile restore controls, namespace selection, and optional FUSE mounting.
 
 9. Scheduler and monitor: Later
+   - Partial: the GUI now has a Schedule tab with disabled MVP placeholders for automatic backup and retention controls.
    - Later: split into app/common/monitor binaries like Pika.
    - Later: use the Background Portal for scheduled backups.
    - Later: add battery, metered-network, retry, and notification behavior.
