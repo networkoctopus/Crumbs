@@ -1,0 +1,15 @@
+[package]
+name = "crumbs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A friendly Proxmox Backup Server client for the GNOME desktop"
+
+[features]
+default = ["gui"]
+gui = ["dep:adw", "dep:gtk"]
+
+[dependencies]
+adw = { package = "libadwaita", version = "0.8", features = ["v1_5"], optional = true }
+gtk = { package = "gtk4", version = "0.10", features = ["v4_14"], optional = true }
+

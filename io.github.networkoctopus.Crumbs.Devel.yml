@@ -1,0 +1,35 @@
+id: io.github.networkoctopus.Crumbs
+runtime: org.gnome.Platform
+runtime-version: "50"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: crumbs
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    # Development only. Flathub builds must use generated offline Cargo sources.
+    - --share=network
+
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --filesystem=home:ro
+  - --filesystem=~/.var/app:ro
+  - --system-talk-name=org.freedesktop.UPower
+
+modules:
+  - name: crumbs
+    buildsystem: simple
+    build-commands:
+      - cargo build --release
+      - install -Dm755 target/release/crumbs /app/bin/crumbs
+      - install -Dm644 data/io.github.networkoctopus.Crumbs.desktop /app/share/applications/io.github.networkoctopus.Crumbs.desktop
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg /app/share/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg
+    sources:
+      - type: dir
+        path: .
+

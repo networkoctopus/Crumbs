@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Crumbs
+Comment=Back up your personal files to Proxmox Backup Server
+Exec=crumbs
+Icon=io.github.networkoctopus.Crumbs
+Terminal=false
+Type=Application
+Categories=Utility;Archiving;
+Keywords=backup;proxmox;pbs;restore;
+StartupNotify=true
+
