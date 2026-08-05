@@ -9,8 +9,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 env:
   APP_ID: io.github.networkoctopus.Crumbs
@@ -153,16 +151,30 @@ jobs:
           name: networkoctopus-flatpak-repo
           path: repo
 
-      - name: Configure GitHub Pages
+      - name: Publish shared networkoctopus Flatpak repository
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'
-        uses: actions/configure-pages@v5
+        shell: bash
+        env:
+          FLATPAK_PUBLISH_TOKEN: ${{ secrets.FLATPAK_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
 
-      - name: Upload Pages artifact
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: repo
+          if [[ -z "${FLATPAK_PUBLISH_TOKEN}" ]]; then
+            echo "::error::FLATPAK_PUBLISH_TOKEN is required to publish networkoctopus/flatpak"
+            exit 1
+          fi
 
-      - name: Deploy Flatpak repository to Pages
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'
-        uses: actions/deploy-pages@v4
+          publish_dir="${RUNNER_TEMP}/networkoctopus-flatpak-pages"
+          rm -rf "${publish_dir}"
+          mkdir -p "${publish_dir}"
+          cp -a repo/. "${publish_dir}/"
+          touch "${publish_dir}/.nojekyll"
+
+          git -C "${publish_dir}" init
+          git -C "${publish_dir}" checkout -B gh-pages
+          git -C "${publish_dir}" config user.name "github-actions[bot]"
+          git -C "${publish_dir}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "${publish_dir}" add -A
+          git -C "${publish_dir}" commit -m "Publish networkoctopus Flatpak repo for ${GITHUB_SHA}"
+          git -C "${publish_dir}" remote add origin "https://x-access-token:${FLATPAK_PUBLISH_TOKEN}@github.com/networkoctopus/flatpak.git"
+          git -C "${publish_dir}" push --force origin gh-pages

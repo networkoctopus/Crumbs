@@ -1,23 +1,22 @@
 # Flatpak publishing
 
 Crumbs can be built by GitHub Actions as a Flatpak and exported into the shared
-networkoctopus OSTree Flatpak repository. The workflow publishes that repository
-to GitHub Pages when a GPG signing key is configured.
+`networkoctopus` OSTree Flatpak repository. Crumbs is one app published by that
+repository; the repository identity is not app-specific.
 
 ## One-time GitHub setup
 
-1. Enable GitHub Pages for the repository that serves the Flatpak remote.
+1. Create the shared Flatpak repository.
+
+   Create a GitHub repository at `networkoctopus/flatpak`. In that repository,
+   enable GitHub Pages with source **Deploy from a branch**, branch `gh-pages`,
+   and folder `/ (root)`.
 
    The published remote URL is:
 
    ```text
    https://networkoctopus.github.io/flatpak/
    ```
-
-   GitHub Pages must be configured so that URL is backed by this workflow's
-   deployed `repo/` directory. The simplest GitHub Pages shape is a repository
-   named `flatpak` under the `networkoctopus` account with Pages source set to
-   **GitHub Actions**.
 
 2. Create a dedicated Flatpak signing key.
 
@@ -32,7 +31,17 @@ to GitHub Pages when a GPG signing key is configured.
 
    Copy the long key ID or fingerprint from the `sec` line.
 
-3. Add the signing key to GitHub Actions secrets.
+3. Add the publishing token and signing key to GitHub Actions secrets.
+
+   Create a fine-grained GitHub token that can write contents to the
+   `networkoctopus/flatpak` repository, then add it as this Crumbs repository
+   secret:
+
+   ```text
+   FLATPAK_PUBLISH_TOKEN
+   ```
+
+   Then add the signing key secrets.
 
    ```bash
    gpg --armor --export-secret-keys YOUR_KEY_ID > crumbs-flatpak-private.asc
