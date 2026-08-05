@@ -42,6 +42,7 @@ modules:
       - install -Dm755 target/release/crumbs /app/bin/crumbs
       - install -Dm644 data/io.github.networkoctopus.Crumbs.desktop /app/share/applications/io.github.networkoctopus.Crumbs.desktop
       - install -Dm644 data/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg /app/share/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg
+      - install -Dm644 data/io.github.networkoctopus.Crumbs.metainfo.xml /app/share/metainfo/io.github.networkoctopus.Crumbs.metainfo.xml
       - install -Dm644 THIRD_PARTY_NOTICES.md /app/share/doc/crumbs/THIRD_PARTY_NOTICES.md
       - install -Dm644 LICENSES/AGPL-3.0.txt /app/share/doc/crumbs/LICENSES/AGPL-3.0.txt
     sources:

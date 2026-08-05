@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.networkoctopus.Crumbs</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>Crumbs</name>
+  <summary>Back up your personal files to Proxmox Backup Server</summary>
+  <description>
+    <p>
+      Crumbs is a GNOME desktop client for Proxmox Backup Server. It helps you
+      configure Proxmox Backup Server connections, back up folders, browse
+      snapshots, and restore files using proxmox-backup-client.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.networkoctopus.Crumbs.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+    <category>Archiving</category>
+  </categories>
+  <keywords>
+    <keyword>backup</keyword>
+    <keyword>restore</keyword>
+    <keyword>proxmox</keyword>
+    <keyword>pbs</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/networkoctopus/Crumbs</url>
+  <url type="bugtracker">https://github.com/networkoctopus/Crumbs/issues</url>
+  <developer id="io.github.networkoctopus">
+    <name>networkoctopus</name>
+  </developer>
+  <releases>
+    <release version="0.1.0" date="2026-08-05">
+      <description>
+        <p>Initial development Flatpak repository build.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1" />
+</component>
