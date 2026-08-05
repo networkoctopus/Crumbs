@@ -4,3 +4,5 @@
 /repo/
 *.flatpak
 local/
+__pycache__/
+*.pyc

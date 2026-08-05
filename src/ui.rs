@@ -25,6 +25,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 const APP_ID: &str = "io.github.networkoctopus.Crumbs";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run() -> glib::ExitCode {
     let application = adw::Application::builder().application_id(APP_ID).build();
@@ -302,6 +303,32 @@ enum OperationKind {
     Restore,
 }
 
+fn primary_menu_button() -> gtk::MenuButton {
+    let menu = gio::Menu::new();
+    menu.append(Some("About Crumbs"), Some("app.about"));
+
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main Menu")
+        .menu_model(&menu)
+        .build()
+}
+
+fn show_about_dialog(parent: Option<&gtk::Window>) {
+    let dialog = gtk::AboutDialog::builder()
+        .modal(true)
+        .program_name("Crumbs")
+        .version(APP_VERSION)
+        .comments("Back up your personal files to Proxmox Backup Server")
+        .website("https://github.com/networkoctopus/Crumbs")
+        .website_label("Crumbs on GitHub")
+        .logo_icon_name(APP_ID)
+        .build();
+
+    dialog.set_transient_for(parent);
+    dialog.present();
+}
+
 fn build_ui(application: &adw::Application) {
     let quit = gio::SimpleAction::new("quit", None);
     let application_weak = application.downgrade();
@@ -312,6 +339,16 @@ fn build_ui(application: &adw::Application) {
     });
     application.add_action(&quit);
     application.set_accels_for_action("app.quit", &["<primary>q"]);
+
+    let about = gio::SimpleAction::new("about", None);
+    let application_weak = application.downgrade();
+    about.connect_activate(move |_, _| {
+        let parent = application_weak
+            .upgrade()
+            .and_then(|application| application.active_window());
+        show_about_dialog(parent.as_ref());
+    });
+    application.add_action(&about);
 
     let settings_store = AppSettingsStore::new(settings_path());
     let saved_settings = settings_store.load().unwrap_or_else(|error| {
@@ -722,6 +759,7 @@ fn build_ui(application: &adw::Application) {
     let overview_header = adw::HeaderBar::builder()
         .title_widget(&gtk::Label::new(Some("Crumbs")))
         .build();
+    overview_header.pack_end(&primary_menu_button());
 
     let add_server_button = section_add_button("Add Server");
     let add_server_empty_row = empty_action_row(
