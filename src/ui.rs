@@ -804,6 +804,10 @@ fn delete_server(widgets: &FormWidgets, row: &adw::ActionRow) {
             widgets.repository.set_text("");
             widgets.password.set_text("");
             widgets.fingerprint.set_text("");
+            widgets.add_server_empty_row.set_title("Add a server");
+            widgets
+                .add_server_empty_row
+                .set_subtitle("Connect to a Proxmox Backup Server datastore");
         }
         widgets.servers_group.remove(row);
         update_server_dependent_actions(widgets);
@@ -828,6 +832,7 @@ fn add_backup_overview_row(
     remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_button);
     remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_empty_row);
     widgets.backups_group.add(&row);
+    widgets.backups_group.add(&widgets.add_backup_button);
     update_server_dependent_actions(widgets);
 }
 
@@ -1135,6 +1140,7 @@ fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
             .add_toast(adw::Toast::new("Backup settings updated"));
     } else {
         add_backup_overview_row(widgets, &config, navigation_view);
+        widgets.active_backup_row.borrow_mut().take();
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Backup settings saved"));
@@ -1326,7 +1332,6 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
             .set_selected(gtk::INVALID_LIST_POSITION);
         widgets.archive_row.set_selected(gtk::INVALID_LIST_POSITION);
         update_server_dependent_actions(widgets);
-        primary_overview_row.set_subtitle(&overview_server_subtitle(&label));
         return;
     }
     primary_overview_row.set_subtitle(&overview_server_subtitle(&label));
