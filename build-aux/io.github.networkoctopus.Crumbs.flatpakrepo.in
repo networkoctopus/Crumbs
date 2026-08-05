@@ -1,5 +1,5 @@
 [Flatpak Repo]
-Title=networkoctopus Flatpaks
+Title=Flatpaks
 Name=networkoctopus
 Url=@REPO_URL@
 Homepage=https://github.com/networkoctopus/Crumbs
