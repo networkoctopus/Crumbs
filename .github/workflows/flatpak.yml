@@ -15,6 +15,9 @@ permissions:
 env:
   APP_ID: io.github.networkoctopus.Crumbs
   MANIFEST: io.github.networkoctopus.Crumbs.Devel.yml
+  FLATPAK_REMOTE_NAME: networkoctopus
+  FLATPAK_REPO_URL: https://networkoctopus.github.io/flatpak/
+  FLATPAKREPO_FILE: networkoctopus.flatpakrepo
 
 jobs:
   build:
@@ -118,8 +121,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          repo_name="${GITHUB_REPOSITORY#*/}"
-          repo_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}/"
+          repo_url="${FLATPAK_REPO_URL}"
           gpg_key=""
           no_gpg_verify="true"
 
@@ -130,7 +132,7 @@ jobs:
 
           python3 build-aux/render-flatpakrepo.py \
             --template build-aux/io.github.networkoctopus.Crumbs.flatpakrepo.in \
-            --output "repo/${APP_ID}.flatpakrepo" \
+            --output "repo/${FLATPAKREPO_FILE}" \
             --repo-url "${repo_url}" \
             --gpg-key "${gpg_key}" \
             --no-gpg-verify "${no_gpg_verify}"
@@ -148,7 +150,7 @@ jobs:
       - name: Upload Flatpak repo artifact
         uses: actions/upload-artifact@v4
         with:
-          name: crumbs-flatpak-repo
+          name: networkoctopus-flatpak-repo
           path: repo
 
       - name: Configure GitHub Pages

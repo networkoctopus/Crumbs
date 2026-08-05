@@ -1,10 +1,10 @@
 [Flatpak Repo]
-Title=Crumbs
-Name=crumbs
+Title=networkoctopus Flatpaks
+Name=networkoctopus
 Url=@REPO_URL@
 Homepage=https://github.com/networkoctopus/Crumbs
-Comment=Crumbs development Flatpak repository
-Description=Development builds of Crumbs, a GNOME Proxmox Backup Server client.
+Comment=networkoctopus Flatpak repository
+Description=Flatpak builds published by networkoctopus.
 Icon=https://raw.githubusercontent.com/networkoctopus/Crumbs/main/data/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg
 GPGKey=@GPG_KEY@
 NoGPGVerify=@NO_GPG_VERIFY@

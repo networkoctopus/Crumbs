@@ -1,15 +1,23 @@
 # Flatpak publishing
 
-Crumbs can be built by GitHub Actions as a Flatpak and exported as an OSTree
-Flatpak repository. The workflow also publishes that repository to GitHub Pages
-when a GPG signing key is configured.
+Crumbs can be built by GitHub Actions as a Flatpak and exported into the shared
+networkoctopus OSTree Flatpak repository. The workflow publishes that repository
+to GitHub Pages when a GPG signing key is configured.
 
 ## One-time GitHub setup
 
-1. Enable GitHub Pages for the repository.
+1. Enable GitHub Pages for the repository that serves the Flatpak remote.
 
-   In GitHub, open the repository settings, go to **Pages**, and set the source
-   to **GitHub Actions**.
+   The published remote URL is:
+
+   ```text
+   https://networkoctopus.github.io/flatpak/
+   ```
+
+   GitHub Pages must be configured so that URL is backed by this workflow's
+   deployed `repo/` directory. The simplest GitHub Pages shape is a repository
+   named `flatpak` under the `networkoctopus` account with Pages source set to
+   **GitHub Actions**.
 
 2. Create a dedicated Flatpak signing key.
 
@@ -48,9 +56,16 @@ when a GPG signing key is configured.
 After the first successful signed deployment, install the remote with:
 
 ```bash
-flatpak remote-add --user crumbs https://networkoctopus.github.io/Crumbs/io.github.networkoctopus.Crumbs.flatpakrepo
-flatpak install --user crumbs io.github.networkoctopus.Crumbs
+flatpak remote-add --user networkoctopus https://networkoctopus.github.io/flatpak/networkoctopus.flatpakrepo
+flatpak install --user networkoctopus io.github.networkoctopus.Crumbs
 flatpak run io.github.networkoctopus.Crumbs
+```
+
+If you previously used the app-specific `crumbs` remote, remove it after
+switching:
+
+```bash
+flatpak remote-delete --user crumbs
 ```
 
 Update later with:
