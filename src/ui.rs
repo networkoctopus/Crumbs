@@ -1,4 +1,5 @@
 use crate::{
+    app_store::{AppSettingsDocument, AppSettingsStore, StoredBackup, StoredServer},
     domain::{
         BackupProfile, ChangeDetection, CryptMode, EncryptionSettings, RetentionPolicy,
         default_home_exclusions,
@@ -7,6 +8,7 @@ use crate::{
     pbs::{CommandSpec, PbsClient},
     pbs_output::BackupActivity,
     restore::{SnapshotFile, SnapshotSummary, parse_snapshot_files, parse_snapshot_list},
+    secret_store::SecretStore,
 };
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -39,6 +41,51 @@ struct BackupConfig {
     server: String,
     source: String,
     archive_name: String,
+    exclusions: Vec<String>,
+}
+
+impl From<&StoredServer> for ServerConfig {
+    fn from(server: &StoredServer) -> Self {
+        Self {
+            name: server.name.clone(),
+            repository: server.repository.clone(),
+            fingerprint: server.fingerprint.clone(),
+        }
+    }
+}
+
+impl From<&ServerConfig> for StoredServer {
+    fn from(server: &ServerConfig) -> Self {
+        Self {
+            name: server.name.clone(),
+            repository: server.repository.clone(),
+            fingerprint: server.fingerprint.clone(),
+        }
+    }
+}
+
+impl From<&StoredBackup> for BackupConfig {
+    fn from(backup: &StoredBackup) -> Self {
+        Self {
+            name: backup.name.clone(),
+            server: backup.server.clone(),
+            source: backup.source.to_string_lossy().into_owned(),
+            archive_name: backup.archive_name.clone(),
+            exclusions: backup.exclusions.clone(),
+        }
+    }
+}
+
+impl From<&BackupConfig> for StoredBackup {
+    fn from(backup: &BackupConfig) -> Self {
+        Self {
+            name: backup.name.clone(),
+            server: backup.server.clone(),
+            source: PathBuf::from(&backup.source),
+            archive_name: backup.archive_name.clone(),
+            exclusions: backup.exclusions.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -87,6 +134,8 @@ struct FormWidgets {
     updating_snapshots: Rc<Cell<bool>>,
     server_model: Rc<gtk::StringList>,
     servers: Rc<RefCell<Vec<ServerConfig>>>,
+    settings_store: AppSettingsStore,
+    secret_store: SecretStore,
     servers_group: adw::PreferencesGroup,
     backups_group: adw::PreferencesGroup,
     backups: Rc<RefCell<Vec<BackupConfig>>>,
@@ -122,54 +171,85 @@ fn build_ui(application: &adw::Application) {
     application.add_action(&quit);
     application.set_accels_for_action("app.quit", &["<primary>q"]);
 
+    let settings_store = AppSettingsStore::new(settings_path());
+    let saved_settings = settings_store.load().unwrap_or_else(|error| {
+        eprintln!("Failed to load Crumbs settings: {error}");
+        AppSettingsDocument::new(Vec::new(), Vec::new()).expect("empty settings are valid")
+    });
+    let mut server_configs = saved_settings
+        .servers
+        .iter()
+        .map(ServerConfig::from)
+        .collect::<Vec<_>>();
+    if server_configs.is_empty() {
+        let default_repository = default_repository();
+        if !default_repository.trim().is_empty() {
+            server_configs.push(ServerConfig {
+                name: default_server_name(),
+                repository: default_repository,
+                fingerprint: default_fingerprint(),
+            });
+        }
+    }
+    let backup_configs = if saved_settings.backups.is_empty() && !server_configs.is_empty() {
+        vec![BackupConfig {
+            name: default_backup_id(),
+            server: server_configs[0].name.clone(),
+            source: default_source(),
+            archive_name: "home".into(),
+            exclusions: default_home_exclusions(),
+        }]
+    } else {
+        saved_settings
+            .backups
+            .iter()
+            .map(BackupConfig::from)
+            .collect::<Vec<_>>()
+    };
+    let has_initial_server = !server_configs.is_empty();
+    let initial_server_name = server_configs
+        .first()
+        .map_or_else(default_server_name, |server| server.name.clone());
+    let initial_repository = server_configs
+        .first()
+        .map_or_else(default_repository, |server| server.repository.clone());
+    let initial_fingerprint = server_configs
+        .first()
+        .map_or_else(default_fingerprint, |server| server.fingerprint.clone());
+
     let server_name = adw::EntryRow::builder()
         .title("Name")
-        .text(default_server_name())
+        .text(initial_server_name)
         .build();
     let repository = adw::EntryRow::builder()
         .title("Server")
-        .text(default_repository())
+        .text(initial_repository)
         .build();
     let password = adw::PasswordEntryRow::builder().title("Password").build();
     let fingerprint = adw::EntryRow::builder()
         .title("Certificate Fingerprint")
-        .text(default_fingerprint())
+        .text(initial_fingerprint)
         .build();
     let check_button = gtk::Button::builder().label("Check Server").build();
 
-    let default_repository = default_repository();
-    let initial_server = (!default_repository.trim().is_empty()).then(|| ServerConfig {
-        name: default_server_name(),
-        repository: default_repository,
-        fingerprint: default_fingerprint(),
-    });
-    let initial_server_labels: Vec<String> = initial_server
-        .as_ref()
-        .map(server_label)
-        .into_iter()
-        .collect();
+    let initial_server_labels: Vec<String> = server_configs.iter().map(server_label).collect();
     let initial_server_refs: Vec<&str> = initial_server_labels.iter().map(String::as_str).collect();
     let server_model = Rc::new(gtk::StringList::new(&initial_server_refs));
-    let servers = Rc::new(RefCell::new(
-        initial_server.iter().cloned().collect::<Vec<_>>(),
-    ));
+    let servers = Rc::new(RefCell::new(server_configs));
+    let initial_selected = if has_initial_server {
+        0
+    } else {
+        gtk::INVALID_LIST_POSITION
+    };
     let backup_server_row = adw::ComboRow::builder()
         .title("Server")
         .model(&*server_model)
-        .selected(if initial_server.is_some() {
-            0
-        } else {
-            gtk::INVALID_LIST_POSITION
-        })
+        .selected(initial_selected)
         .build();
     let restore_server_row = adw::ComboRow::builder()
         .title("Server")
         .model(&*server_model)
-        .selected(if initial_server.is_some() {
-            0
-        } else {
-            gtk::INVALID_LIST_POSITION
-        })
+        .selected(initial_selected)
         .build();
 
     let source = adw::EntryRow::builder()
@@ -439,43 +519,46 @@ fn build_ui(application: &adw::Application) {
     );
 
     let servers_group = adw::PreferencesGroup::builder().title("Servers").build();
-    let server_overview_row = initial_server.as_ref().map(|server| {
-        overview_row(
-            "network-server-symbolic",
-            &server.name,
-            &overview_server_subtitle(&server.repository),
-        )
-    });
-    if let Some(row) = server_overview_row.as_ref() {
-        servers_group.add(row);
-        servers_group.add(&add_server_button);
-    } else {
+    let server_overview_rows = servers
+        .borrow()
+        .iter()
+        .map(|server| {
+            overview_row(
+                "network-server-symbolic",
+                &server.name,
+                &overview_server_subtitle(&server.repository),
+            )
+        })
+        .collect::<Vec<_>>();
+    if server_overview_rows.is_empty() {
         servers_group.add(&add_server_empty_row);
+    } else {
+        for row in server_overview_rows.iter() {
+            servers_group.add(row);
+        }
+        servers_group.add(&add_server_button);
     }
 
     let backups_group = adw::PreferencesGroup::builder().title("Backups").build();
-    let initial_backup = initial_server.as_ref().map(|server| BackupConfig {
-        name: default_backup_id(),
-        server: server.name.clone(),
-        source: default_source(),
-        archive_name: "home".into(),
-    });
-    let backup_overview_row = initial_backup.as_ref().map(|backup| {
-        overview_row(
-            "drive-harddisk-symbolic",
-            &backup.name,
-            &backup_label(backup),
-        )
-    });
-    if let Some(row) = backup_overview_row.as_ref() {
-        backups_group.add(row);
-        backups_group.add(&add_backup_button);
-    } else {
+    let backup_overview_rows = backup_configs
+        .iter()
+        .map(|backup| {
+            overview_row(
+                "drive-harddisk-symbolic",
+                &backup.name,
+                &backup_label(backup),
+            )
+        })
+        .collect::<Vec<_>>();
+    if backup_overview_rows.is_empty() {
         backups_group.add(&add_backup_empty_row);
+    } else {
+        for row in backup_overview_rows.iter() {
+            backups_group.add(row);
+        }
+        backups_group.add(&add_backup_button);
     }
-    let backups = Rc::new(RefCell::new(
-        initial_backup.iter().cloned().collect::<Vec<_>>(),
-    ));
+    let backups = Rc::new(RefCell::new(backup_configs));
 
     let restore_home_group = adw::PreferencesGroup::builder().title("Restore").build();
     let restore_overview_row = overview_row(
@@ -538,6 +621,8 @@ fn build_ui(application: &adw::Application) {
         updating_snapshots: Rc::new(Cell::new(false)),
         server_model,
         servers,
+        settings_store,
+        secret_store: SecretStore::new(),
         servers_group: servers_group.clone(),
         backups_group: backups_group.clone(),
         backups,
@@ -574,11 +659,11 @@ fn build_ui(application: &adw::Application) {
         &widgets.restore_destination_path,
         "Choose Restore Destination",
     );
-    if let Some(row) = server_overview_row.as_ref() {
+    for row in server_overview_rows.iter() {
         add_server_open_action(row, &widgets);
         add_server_delete_button(row, &widgets);
     }
-    if let Some(row) = backup_overview_row.as_ref() {
+    for row in backup_overview_rows.iter() {
         add_backup_open_action(row, &widgets, &navigation_view);
         add_backup_delete_button(row, &widgets);
     }
@@ -728,6 +813,10 @@ fn prepare_new_backup(widgets: &FormWidgets) {
     widgets.backup_id.set_text(&format!("backup-{next}"));
     widgets.archive_name.set_text("home");
     widgets.source.set_text(&default_source());
+    widgets
+        .exclusions
+        .buffer()
+        .set_text(&default_home_exclusions().join("\n"));
     widgets.source_path.borrow_mut().take();
     reset_activity(&widgets.backup_activity);
 }
@@ -756,6 +845,14 @@ fn add_server_open_action(row: &adw::ActionRow, widgets: &FormWidgets) {
             widgets.server_name.set_text(&server.name);
             widgets.repository.set_text(&server.repository);
             widgets.fingerprint.set_text(&server.fingerprint);
+            if let Ok(Some(password)) = widgets
+                .secret_store
+                .get_pbs_password(&server.name, &server.repository)
+            {
+                widgets.password.set_text(&password);
+            } else {
+                widgets.password.set_text("");
+            }
             show_server_dialog(row, &widgets, row);
         }
     });
@@ -785,17 +882,23 @@ fn add_server_delete_button(row: &adw::ActionRow, widgets: &FormWidgets) {
 
 fn delete_server(widgets: &FormWidgets, row: &adw::ActionRow) {
     let server_name = row.title().to_string();
-    let removed_index = {
+    let removed = {
         let mut servers = widgets.servers.borrow_mut();
         servers
             .iter()
             .position(|server| server.name == server_name)
-            .inspect(|index| {
-                servers.remove(*index);
-            })
+            .map(|index| (index, servers.remove(index)))
     };
 
-    if let Some(index) = removed_index {
+    if let Some((index, removed_server)) = removed {
+        if let Err(error) = widgets
+            .secret_store
+            .delete_pbs_password(&removed_server.name, &removed_server.repository)
+        {
+            widgets
+                .toast_overlay
+                .add_toast(adw::Toast::new(&error.to_string()));
+        }
         if widgets.server_model.n_items() > index as u32 {
             widgets.server_model.remove(index as u32);
         }
@@ -811,6 +914,7 @@ fn delete_server(widgets: &FormWidgets, row: &adw::ActionRow) {
         }
         widgets.servers_group.remove(row);
         update_server_dependent_actions(widgets);
+        save_app_settings_or_toast(widgets);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server deleted"));
@@ -858,6 +962,10 @@ fn add_backup_open_action(
             widgets.source.set_text(&backup.source);
             widgets.source_path.borrow_mut().take();
             widgets.server_name.set_text(&backup.server);
+            widgets
+                .exclusions
+                .buffer()
+                .set_text(&backup.exclusions.join("\n"));
         }
         navigation_view.push_by_tag("backup-detail");
     });
@@ -901,6 +1009,7 @@ fn delete_backup(widgets: &FormWidgets, row: &adw::ActionRow) {
     if removed {
         widgets.backups_group.remove(row);
         update_server_dependent_actions(widgets);
+        save_app_settings_or_toast(widgets);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Backup deleted"));
@@ -1003,8 +1112,9 @@ fn show_server_dialog(
             &password_row,
             &fingerprint_row,
         );
-        save_server(&widgets_for_save, &overview_row);
-        dialog_for_save.close();
+        if save_server(&widgets_for_save, &overview_row) {
+            dialog_for_save.close();
+        }
     });
 
     dialog.present();
@@ -1111,6 +1221,7 @@ fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
         server,
         source,
         archive_name,
+        exclusions: exclusion_patterns(widgets),
     };
     let active_row = widgets.active_backup_row.borrow().clone();
     let previous_name = active_row.as_ref().map(|row| row.title().to_string());
@@ -1135,16 +1246,91 @@ fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
             row.set_title(&config.name);
             row.set_subtitle(&backup_label(&config));
         }
+        save_app_settings_or_toast(widgets);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Backup settings updated"));
     } else {
         add_backup_overview_row(widgets, &config, navigation_view);
         widgets.active_backup_row.borrow_mut().take();
+        save_app_settings_or_toast(widgets);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Backup settings saved"));
     }
+}
+
+fn store_current_server_password_or_toast(widgets: &FormWidgets, server: &ServerConfig) -> bool {
+    let password = widgets.password.text();
+    if password.is_empty() {
+        return true;
+    }
+    if let Err(error) =
+        widgets
+            .secret_store
+            .store_pbs_password(&server.name, &server.repository, password.as_str())
+    {
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new(&error.to_string()));
+        return false;
+    }
+    true
+}
+
+fn password_for_operation(widgets: &FormWidgets, repository: &str) -> Result<String, String> {
+    let password = widgets.password.text().to_string();
+    if !password.is_empty() {
+        return Ok(password);
+    }
+    let server_name = widgets.server_name.text().trim().to_owned();
+    if server_name.is_empty() {
+        return Err("Password is required".into());
+    }
+    match widgets
+        .secret_store
+        .get_pbs_password(&server_name, repository)
+        .map_err(|error| error.to_string())?
+    {
+        Some(password) if !password.is_empty() => Ok(password),
+        _ => Err("Password is required".into()),
+    }
+}
+
+fn save_app_settings(widgets: &FormWidgets) -> Result<(), crate::app_store::StoreError> {
+    let servers = widgets
+        .servers
+        .borrow()
+        .iter()
+        .map(StoredServer::from)
+        .collect::<Vec<_>>();
+    let backups = widgets
+        .backups
+        .borrow()
+        .iter()
+        .map(StoredBackup::from)
+        .collect::<Vec<_>>();
+    let document = AppSettingsDocument::new(servers, backups)?;
+    widgets.settings_store.save(&document)
+}
+
+fn save_app_settings_or_toast(widgets: &FormWidgets) {
+    if let Err(error) = save_app_settings(widgets) {
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new(&error.to_string()));
+    }
+}
+
+fn exclusion_patterns(widgets: &FormWidgets) -> Vec<String> {
+    let buffer = widgets.exclusions.buffer();
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn reset_activity(activity: &ActivityWidgets) {
@@ -1258,6 +1444,14 @@ fn apply_selected_server(widgets: &FormWidgets, selected: u32) {
         widgets.server_name.set_text(&server.name);
         widgets.repository.set_text(&server.repository);
         widgets.fingerprint.set_text(&server.fingerprint);
+        if let Ok(Some(password)) = widgets
+            .secret_store
+            .get_pbs_password(&server.name, &server.repository)
+        {
+            widgets.password.set_text(&password);
+        } else {
+            widgets.password.set_text("");
+        }
     }
 }
 
@@ -1269,7 +1463,7 @@ fn connect_server_selector(row: &adw::ComboRow, widgets: &FormWidgets) {
     });
 }
 
-fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
+fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) -> bool {
     let name = widgets.server_name.text().trim().to_owned();
     let repository = widgets.repository.text().trim().to_owned();
     let fingerprint = widgets.fingerprint.text().trim().to_owned();
@@ -1277,19 +1471,19 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server name is required"));
-        return;
+        return false;
     }
     if repository.is_empty() {
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server is required"));
-        return;
+        return false;
     }
     if widgets.password.text().is_empty() {
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Password is required"));
-        return;
+        return false;
     }
 
     let server = ServerConfig {
@@ -1297,6 +1491,10 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
         repository,
         fingerprint,
     };
+    if !store_current_server_password_or_toast(widgets, &server) {
+        return false;
+    }
+
     let label = server_label(&server);
     let previous_name = primary_overview_row.title().to_string();
     let updated_index =
@@ -1317,6 +1515,7 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
         primary_overview_row.set_title(&server.name);
         primary_overview_row.set_subtitle(&server.repository);
         widgets.server_model.splice(index as u32, 1, &[&label]);
+        save_app_settings_or_toast(widgets);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server updated"));
@@ -1324,6 +1523,7 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
     } else {
         add_server_overview_row(widgets, &server);
         widgets.server_model.append(&label);
+        save_app_settings_or_toast(widgets);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server added"));
@@ -1332,9 +1532,10 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
             .set_selected(gtk::INVALID_LIST_POSITION);
         widgets.archive_row.set_selected(gtk::INVALID_LIST_POSITION);
         update_server_dependent_actions(widgets);
-        return;
+        return true;
     }
     primary_overview_row.set_subtitle(&overview_server_subtitle(&label));
+    true
 }
 
 fn confirm_destructive(
@@ -1698,14 +1899,11 @@ struct UiOperation {
 
 fn build_operation(widgets: &FormWidgets, kind: OperationKind) -> Result<UiOperation, String> {
     let repository = widgets.repository.text().trim().to_owned();
-    let password = widgets.password.text().to_string();
     let fingerprint = widgets.fingerprint.text().trim().to_owned();
     if repository.is_empty() {
         return Err("Server is required".into());
     }
-    if password.is_empty() {
-        return Err("Password is required".into());
-    }
+    let password = password_for_operation(widgets, &repository)?;
 
     let mut environment = CommandEnvironment::new();
     environment.insert("PBS_PASSWORD", password);
@@ -1873,14 +2071,7 @@ fn profile_from_form(widgets: &FormWidgets, repository: &str) -> Result<BackupPr
         return Err("Archive name is required".into());
     }
 
-    let buffer = widgets.exclusions.buffer();
-    let exclusions = buffer
-        .text(&buffer.start_iter(), &buffer.end_iter(), false)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect();
+    let exclusions = exclusion_patterns(widgets);
 
     let profile = BackupProfile {
         id: "manual".into(),
@@ -1911,6 +2102,10 @@ fn pbs_client_path() -> PathBuf {
     } else {
         PathBuf::from("proxmox-backup-client")
     }
+}
+
+fn settings_path() -> PathBuf {
+    glib::user_config_dir().join("Crumbs").join("settings.json")
 }
 
 fn default_repository() -> String {

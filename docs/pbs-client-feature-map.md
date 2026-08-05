@@ -32,13 +32,15 @@ Status legend:
    - Done: profiles have stable IDs and duplicate IDs are rejected.
    - Done: profile files contain no secrets.
    - Done: source folder, exclusions, namespace, backup ID, archive name, retention, change detection, and encryption settings serialize.
-   - Next: choose the production config path, likely `$XDG_CONFIG_HOME/crumbs/profiles.json`.
+   - Done: app settings persist non-secret server fields and backup settings under the user config directory.
+   - Done: saved servers and backups are loaded back into the home screen on startup.
+   - Next: unify the early profile-store model and UI app-settings model around stable IDs.
    - Later: add version migrations beyond document version 1.
 
 3. Secrets: Partial
-   - Done: the first GUI keeps PBS password and fingerprint in memory and injects them into child process environments only.
-   - Next: add Secret Service integration.
-   - Next: store PBS password or API token secret, certificate fingerprint, and encryption password by profile ID.
+   - Done: PBS passwords are stored through Secret Service and are not written to JSON settings.
+   - Done: command execution retrieves saved PBS passwords from Secret Service and injects them into child process environments only.
+   - Next: store API token secrets and encryption passwords with stable profile/server IDs.
    - Later: consider file-descriptor based password passing where PBS supports it.
 
 4. Subprocess executor: Partial
@@ -72,8 +74,9 @@ Status legend:
    - Done: delete and cancel actions ask for confirmation before continuing.
    - Done: Backup targets open a detail view with Backup and Schedule tabs.
    - Done: backup settings can be saved repeatedly in-session so additional backup rows appear on the home page.
-   - Next: save non-secret server and backup fields through profile persistence.
-   - Next: add Secret Service persistence for credentials.
+   - Done: non-secret server and backup fields are saved and restored between launches.
+   - Done: PBS passwords are saved through Secret Service.
+   - Next: add API-token-specific labels/validation and encryption password handling.
    - Later: expand setup into a proper guided Pika/Deja Dup-style flow with namespace, encryption, and retention controls.
 
 7. Manual backup UI: Partial

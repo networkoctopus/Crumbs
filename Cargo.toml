@@ -7,11 +7,12 @@ description = "A friendly Proxmox Backup Server client for the GNOME desktop"
 
 [features]
 default = ["gui"]
-gui = ["dep:adw", "dep:gtk"]
+gui = ["dep:adw", "dep:gtk", "dep:secret-service"]
 
 [dependencies]
 adw = { package = "libadwaita", version = "0.8", features = ["v1_5"], optional = true }
 gtk = { package = "gtk4", version = "0.10", features = ["v4_14"], optional = true }
+secret-service = { version = "5", features = ["rt-async-io-crypto-rust"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
