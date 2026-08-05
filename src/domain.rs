@@ -13,6 +13,7 @@ pub struct BackupProfile {
     pub backup_id: String,
     pub archive_name: String,
     pub source: PathBuf,
+    pub sources: Vec<BackupSource>,
     pub exclusions: Vec<String>,
     pub change_detection: ChangeDetection,
     pub encryption: EncryptionSettings,
@@ -30,6 +31,7 @@ impl BackupProfile {
             backup_id: "desktop".into(),
             archive_name: "home".into(),
             source: home.into(),
+            sources: Vec::new(),
             exclusions: default_home_exclusions(),
             change_detection: ChangeDetection::Metadata,
             encryption: EncryptionSettings::default(),
@@ -59,8 +61,16 @@ impl BackupProfile {
                 return Err(ValidationError::InvalidNamespace);
             }
         }
-        if !self.source.is_absolute() {
-            return Err(ValidationError::SourceNotAbsolute);
+        if self.backup_sources().is_empty() {
+            return Err(ValidationError::SourceRequired);
+        }
+        for source in self.backup_sources() {
+            if !valid_identifier(&source.archive_name) {
+                return Err(ValidationError::InvalidArchiveName);
+            }
+            if !source.path.is_absolute() {
+                return Err(ValidationError::SourceNotAbsolute);
+            }
         }
         if let Some(keyfile) = &self.encryption.keyfile {
             if !keyfile.is_absolute() {
@@ -75,9 +85,36 @@ impl BackupProfile {
         Ok(())
     }
 
-    pub fn archive_specification(&self) -> String {
-        format!("{}.pxar:{}", self.archive_name, self.source.display())
+    pub fn backup_sources(&self) -> Vec<BackupSource> {
+        if self.sources.is_empty() {
+            vec![BackupSource {
+                archive_name: self.archive_name.clone(),
+                path: self.source.clone(),
+            }]
+        } else {
+            self.sources.clone()
+        }
     }
+
+    pub fn archive_specifications(&self) -> Vec<String> {
+        self.backup_sources()
+            .iter()
+            .map(|source| format!("{}.pxar:{}", source.archive_name, source.path.display()))
+            .collect()
+    }
+
+    pub fn archive_specification(&self) -> String {
+        self.archive_specifications()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BackupSource {
+    pub archive_name: String,
+    pub path: PathBuf,
 }
 
 fn valid_profile_id(value: &str) -> bool {
@@ -219,6 +256,7 @@ pub enum ValidationError {
     InvalidBackupId,
     InvalidArchiveName,
     InvalidNamespace,
+    SourceRequired,
     SourceNotAbsolute,
     KeyfileNotAbsolute,
     EmptyRetentionPolicy,
@@ -233,6 +271,7 @@ impl fmt::Display for ValidationError {
             Self::InvalidBackupId => "the backup ID contains unsupported characters",
             Self::InvalidArchiveName => "the archive name contains unsupported characters",
             Self::InvalidNamespace => "the backup namespace is not valid",
+            Self::SourceRequired => "at least one backup source is required",
             Self::SourceNotAbsolute => "the backup source must be an absolute path",
             Self::KeyfileNotAbsolute => "the encryption key file must be an absolute path",
             Self::EmptyRetentionPolicy => "client-managed retention needs at least one keep rule",
@@ -270,6 +309,7 @@ mod tests {
             backup_id: "silver-laptop".into(),
             archive_name: "home".into(),
             source: PathBuf::from("/home/ada"),
+            sources: Vec::new(),
             exclusions: default_home_exclusions(),
             change_detection: ChangeDetection::Metadata,
             encryption: EncryptionSettings::default(),

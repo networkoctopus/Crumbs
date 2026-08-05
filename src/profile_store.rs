@@ -141,6 +141,7 @@ mod tests {
             backup_id: "laptop".into(),
             archive_name: "home".into(),
             source: PathBuf::from("/home/ada"),
+            sources: Vec::new(),
             exclusions: default_home_exclusions(),
             change_detection: ChangeDetection::Metadata,
             encryption: EncryptionSettings::default(),

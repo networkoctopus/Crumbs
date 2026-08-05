@@ -57,9 +57,14 @@ impl PbsClient {
 
     pub fn backup(&self, profile: &BackupProfile) -> Result<CommandSpec, ValidationError> {
         profile.validate()?;
-        let mut arguments = vec![
-            "backup".into(),
-            profile.archive_specification().into(),
+        let mut arguments = vec!["backup".into()];
+        arguments.extend(
+            profile
+                .archive_specifications()
+                .into_iter()
+                .map(OsString::from),
+        );
+        arguments.extend([
             "--repository".into(),
             profile.repository.clone().into(),
             "--backup-id".into(),
@@ -70,7 +75,7 @@ impl PbsClient {
             profile.encryption.crypt_mode.as_argument().into(),
             "--change-detection-mode".into(),
             profile.change_detection.as_argument().into(),
-        ];
+        ]);
         if let Some(keyfile) = &profile.encryption.keyfile {
             arguments.push("--keyfile".into());
             arguments.push(keyfile.as_os_str().to_owned());
@@ -272,6 +277,7 @@ mod tests {
             backup_id: "laptop".into(),
             archive_name: "home".into(),
             source: PathBuf::from("/home/ada"),
+            sources: Vec::new(),
             exclusions: vec!["/.cache/".into(), "/.local/share/Trash/".into()],
             change_detection: ChangeDetection::Metadata,
             encryption: EncryptionSettings::default(),
@@ -316,6 +322,30 @@ mod tests {
                 "/.local/share/Trash/",
             ]
         );
+    }
+
+    #[test]
+    fn backup_can_include_multiple_archives() {
+        let client = PbsClient::new("proxmox-backup-client");
+        let mut profile = profile();
+        profile.sources = vec![
+            crate::domain::BackupSource {
+                archive_name: "home".into(),
+                path: PathBuf::from("/home/ada"),
+            },
+            crate::domain::BackupSource {
+                archive_name: "projects".into(),
+                path: PathBuf::from("/srv/projects"),
+            },
+        ];
+
+        let command = client.backup(&profile).expect("valid command");
+
+        assert!(strings(&command).starts_with(&[
+            "backup".into(),
+            "home.pxar:/home/ada".into(),
+            "projects.pxar:/srv/projects".into(),
+        ]));
     }
 
     #[test]

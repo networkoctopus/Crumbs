@@ -39,7 +39,79 @@ pub struct StoredBackup {
     pub server: String,
     pub source: PathBuf,
     pub archive_name: String,
+    #[serde(default)]
+    pub sources: Vec<StoredBackupSource>,
     pub exclusions: Vec<String>,
+    #[serde(default)]
+    pub schedule: StoredSchedule,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredBackupSource {
+    pub archive_name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StoredSchedule {
+    pub enabled: bool,
+    #[serde(default)]
+    pub frequency: StoredScheduleFrequency,
+    #[serde(default = "default_schedule_hour")]
+    pub preferred_hour: u8,
+    #[serde(default)]
+    pub preferred_minute: u8,
+    #[serde(default)]
+    pub preferred_weekday: u8,
+    #[serde(default = "default_month_day")]
+    pub preferred_month_day: u8,
+    #[serde(default)]
+    pub run_on_battery: bool,
+}
+
+impl Default for StoredSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency: StoredScheduleFrequency::Daily,
+            preferred_hour: default_schedule_hour(),
+            preferred_minute: 0,
+            preferred_weekday: 0,
+            preferred_month_day: default_month_day(),
+            run_on_battery: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoredScheduleFrequency {
+    Hourly,
+    #[default]
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+const fn default_schedule_hour() -> u8 {
+    17
+}
+
+const fn default_month_day() -> u8 {
+    1
+}
+
+impl StoredBackup {
+    pub fn backup_sources(&self) -> Vec<StoredBackupSource> {
+        if self.sources.is_empty() {
+            vec![StoredBackupSource {
+                archive_name: self.archive_name.clone(),
+                path: self.source.clone(),
+            }]
+        } else {
+            self.sources.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -114,12 +186,40 @@ fn validate_backups(backups: &[StoredBackup]) -> Result<(), StoreError> {
                 "backup server is required".into(),
             ));
         }
-        if backup.archive_name.trim().is_empty() {
-            return Err(StoreError::InvalidBackup("archive name is required".into()));
-        }
-        if !backup.source.is_absolute() {
+        let sources = backup.backup_sources();
+        if sources.is_empty() {
             return Err(StoreError::InvalidBackup(
-                "backup source must be absolute".into(),
+                "backup source is required".into(),
+            ));
+        }
+        for source in sources {
+            if source.archive_name.trim().is_empty() {
+                return Err(StoreError::InvalidBackup("archive name is required".into()));
+            }
+            if !source.path.is_absolute() {
+                return Err(StoreError::InvalidBackup(
+                    "backup source must be absolute".into(),
+                ));
+            }
+        }
+        if backup.schedule.preferred_hour > 23 {
+            return Err(StoreError::InvalidBackup(
+                "schedule hour must be between 0 and 23".into(),
+            ));
+        }
+        if backup.schedule.preferred_minute > 59 {
+            return Err(StoreError::InvalidBackup(
+                "schedule minute must be between 0 and 59".into(),
+            ));
+        }
+        if backup.schedule.preferred_weekday > 6 {
+            return Err(StoreError::InvalidBackup(
+                "schedule weekday must be between 0 and 6".into(),
+            ));
+        }
+        if !(1..=31).contains(&backup.schedule.preferred_month_day) {
+            return Err(StoreError::InvalidBackup(
+                "schedule month day must be between 1 and 31".into(),
             ));
         }
         if !names.insert(backup.name.clone()) {
@@ -210,7 +310,12 @@ mod tests {
             server: "PBS".into(),
             source: PathBuf::from("/home/ada"),
             archive_name: "home".into(),
+            sources: vec![StoredBackupSource {
+                archive_name: "home".into(),
+                path: PathBuf::from("/home/ada"),
+            }],
             exclusions: vec!["/.cache/".into()],
+            schedule: StoredSchedule::default(),
         }
     }
 

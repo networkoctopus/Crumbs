@@ -1,12 +1,15 @@
 use crate::{
-    app_store::{AppSettingsDocument, AppSettingsStore, StoredBackup, StoredServer},
+    app_store::{
+        AppSettingsDocument, AppSettingsStore, StoredBackup, StoredBackupSource, StoredSchedule,
+        StoredScheduleFrequency, StoredServer,
+    },
     domain::{
-        BackupProfile, ChangeDetection, CryptMode, EncryptionSettings, RetentionPolicy,
-        default_home_exclusions,
+        BackupProfile, BackupSource, ChangeDetection, CryptMode, EncryptionSettings,
+        RetentionPolicy, default_home_exclusions,
     },
     executor::{CancellationToken, CommandEnvironment, run_command_streaming_cancelable},
     pbs::{CommandSpec, PbsClient},
-    pbs_output::BackupActivity,
+    pbs_output::{BackupActivity, ByteSize},
     restore::{SnapshotFile, SnapshotSummary, parse_snapshot_files, parse_snapshot_list},
     secret_store::SecretStore,
 };
@@ -15,7 +18,8 @@ use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -39,9 +43,68 @@ struct ServerConfig {
 struct BackupConfig {
     name: String,
     server: String,
-    source: String,
-    archive_name: String,
+    sources: Vec<BackupSourceConfig>,
     exclusions: Vec<String>,
+    schedule: ScheduleConfig,
+}
+
+#[derive(Clone)]
+struct BackupSourceConfig {
+    archive_name: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScheduleConfig {
+    enabled: bool,
+    frequency: ScheduleFrequency,
+    preferred_hour: u8,
+    preferred_minute: u8,
+    preferred_weekday: u8,
+    preferred_month_day: u8,
+    run_on_battery: bool,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency: ScheduleFrequency::Daily,
+            preferred_hour: 17,
+            preferred_minute: 0,
+            preferred_weekday: 0,
+            preferred_month_day: 1,
+            run_on_battery: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduleFrequency {
+    Hourly,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl ScheduleFrequency {
+    fn from_selected(selected: u32) -> Self {
+        match selected {
+            0 => Self::Hourly,
+            2 => Self::Weekly,
+            3 => Self::Monthly,
+            _ => Self::Daily,
+        }
+    }
+
+    const fn selected(self) -> u32 {
+        match self {
+            Self::Hourly => 0,
+            Self::Daily => 1,
+            Self::Weekly => 2,
+            Self::Monthly => 3,
+        }
+    }
 }
 
 impl From<&StoredServer> for ServerConfig {
@@ -69,9 +132,16 @@ impl From<&StoredBackup> for BackupConfig {
         Self {
             name: backup.name.clone(),
             server: backup.server.clone(),
-            source: backup.source.to_string_lossy().into_owned(),
-            archive_name: backup.archive_name.clone(),
+            sources: backup
+                .backup_sources()
+                .into_iter()
+                .map(|source| BackupSourceConfig {
+                    archive_name: source.archive_name,
+                    path: source.path,
+                })
+                .collect(),
             exclusions: backup.exclusions.clone(),
+            schedule: ScheduleConfig::from(&backup.schedule),
         }
     }
 }
@@ -81,9 +151,64 @@ impl From<&BackupConfig> for StoredBackup {
         Self {
             name: backup.name.clone(),
             server: backup.server.clone(),
-            source: PathBuf::from(&backup.source),
-            archive_name: backup.archive_name.clone(),
+            source: backup
+                .sources
+                .first()
+                .map(|source| source.path.clone())
+                .unwrap_or_else(glib::home_dir),
+            archive_name: backup
+                .sources
+                .first()
+                .map(|source| source.archive_name.clone())
+                .unwrap_or_else(|| "home".into()),
+            sources: backup
+                .sources
+                .iter()
+                .map(|source| StoredBackupSource {
+                    archive_name: source.archive_name.clone(),
+                    path: source.path.clone(),
+                })
+                .collect(),
             exclusions: backup.exclusions.clone(),
+            schedule: StoredSchedule::from(&backup.schedule),
+        }
+    }
+}
+
+impl From<&StoredSchedule> for ScheduleConfig {
+    fn from(schedule: &StoredSchedule) -> Self {
+        Self {
+            enabled: schedule.enabled,
+            frequency: match schedule.frequency {
+                StoredScheduleFrequency::Hourly => ScheduleFrequency::Hourly,
+                StoredScheduleFrequency::Daily => ScheduleFrequency::Daily,
+                StoredScheduleFrequency::Weekly => ScheduleFrequency::Weekly,
+                StoredScheduleFrequency::Monthly => ScheduleFrequency::Monthly,
+            },
+            preferred_hour: schedule.preferred_hour,
+            preferred_minute: schedule.preferred_minute,
+            preferred_weekday: schedule.preferred_weekday,
+            preferred_month_day: schedule.preferred_month_day,
+            run_on_battery: schedule.run_on_battery,
+        }
+    }
+}
+
+impl From<&ScheduleConfig> for StoredSchedule {
+    fn from(schedule: &ScheduleConfig) -> Self {
+        Self {
+            enabled: schedule.enabled,
+            frequency: match schedule.frequency {
+                ScheduleFrequency::Hourly => StoredScheduleFrequency::Hourly,
+                ScheduleFrequency::Daily => StoredScheduleFrequency::Daily,
+                ScheduleFrequency::Weekly => StoredScheduleFrequency::Weekly,
+                ScheduleFrequency::Monthly => StoredScheduleFrequency::Monthly,
+            },
+            preferred_hour: schedule.preferred_hour,
+            preferred_minute: schedule.preferred_minute,
+            preferred_weekday: schedule.preferred_weekday,
+            preferred_month_day: schedule.preferred_month_day,
+            run_on_battery: schedule.run_on_battery,
         }
     }
 }
@@ -94,6 +219,7 @@ struct ActivityWidgets {
     phase_label: gtk::Label,
     metrics_label: gtk::Label,
     warning_label: gtk::Label,
+    details_row: adw::ExpanderRow,
     log_buffer: gtk::TextBuffer,
 }
 
@@ -106,9 +232,12 @@ struct FormWidgets {
     source: adw::EntryRow,
     source_button: gtk::Button,
     source_path: Rc<RefCell<Option<PathBuf>>>,
+    backup_sources: Rc<RefCell<Vec<BackupSourceConfig>>>,
+    source_list: gtk::ListBox,
     backup_id: adw::EntryRow,
     archive_name: adw::EntryRow,
     exclusions: gtk::TextView,
+    exclusions_row: adw::ActionRow,
     check_button: gtk::Button,
     save_backup_button: gtk::Button,
     estimate_button: gtk::Button,
@@ -130,6 +259,17 @@ struct FormWidgets {
     restore_destination_button: gtk::Button,
     restore_destination_path: Rc<RefCell<Option<PathBuf>>>,
     restore_pattern: adw::EntryRow,
+    schedule_switch: gtk::Switch,
+    schedule_frequency: adw::ComboRow,
+    schedule_hour: gtk::SpinButton,
+    schedule_minute: gtk::SpinButton,
+    schedule_weekday: adw::ComboRow,
+    schedule_month_day: gtk::SpinButton,
+    schedule_time_row: adw::ActionRow,
+    schedule_weekday_row: adw::ComboRow,
+    schedule_month_day_row: adw::ActionRow,
+    schedule_run_on_battery: gtk::Switch,
+    schedule_status_row: adw::ActionRow,
     archive_refresh_requested: Rc<Cell<bool>>,
     updating_snapshots: Rc<Cell<bool>>,
     server_model: Rc<gtk::StringList>,
@@ -140,6 +280,8 @@ struct FormWidgets {
     backups_group: adw::PreferencesGroup,
     backups: Rc<RefCell<Vec<BackupConfig>>>,
     active_backup_row: Rc<RefCell<Option<adw::ActionRow>>>,
+    updating_form: Rc<Cell<bool>>,
+    autosave_pending: Rc<Cell<bool>>,
     snapshots: Rc<gtk::StringList>,
     archives: Rc<gtk::StringList>,
     backup_activity: ActivityWidgets,
@@ -195,9 +337,12 @@ fn build_ui(application: &adw::Application) {
         vec![BackupConfig {
             name: default_backup_id(),
             server: server_configs[0].name.clone(),
-            source: default_source(),
-            archive_name: "home".into(),
+            sources: vec![BackupSourceConfig {
+                archive_name: "home".into(),
+                path: glib::home_dir(),
+            }],
             exclusions: default_home_exclusions(),
+            schedule: ScheduleConfig::default(),
         }]
     } else {
         saved_settings
@@ -255,10 +400,22 @@ fn build_ui(application: &adw::Application) {
     let source = adw::EntryRow::builder()
         .title("Source Folder")
         .text(default_source())
+        .visible(false)
         .build();
     let source_button = folder_button("Choose Source Folder");
     let source_path = Rc::new(RefCell::new(None));
+    let backup_sources = Rc::new(RefCell::new(vec![BackupSourceConfig {
+        archive_name: "home".into(),
+        path: glib::home_dir(),
+    }]));
     source.add_suffix(&source_button);
+    let source_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let add_source_button = gtk::Button::from_icon_name("folder-new-symbolic");
+    add_source_button.set_tooltip_text(Some("Add Folder"));
+    add_source_button.add_css_class("flat");
     let backup_id = adw::EntryRow::builder()
         .title("Backup ID")
         .text(default_backup_id())
@@ -276,12 +433,13 @@ fn build_ui(application: &adw::Application) {
     exclusions
         .buffer()
         .set_text(&default_home_exclusions().join("\n"));
-    let exclusions_scroll = gtk::ScrolledWindow::builder()
-        .min_content_height(110)
-        .child(&exclusions)
+    let exclusions_row = adw::ActionRow::builder()
+        .title("Exclusions")
+        .activatable(true)
         .build();
-    let exclusions_row = adw::ActionRow::builder().title("Exclusions").build();
-    exclusions_row.set_child(Some(&exclusions_scroll));
+    exclusions_row.add_prefix(&gtk::Image::from_icon_name("folder-saved-search-symbolic"));
+    let exclusions_edit_icon = gtk::Image::from_icon_name("go-next-symbolic");
+    exclusions_row.add_suffix(&exclusions_edit_icon);
 
     let (backup_activity_group, backup_activity) = activity_group("Activity");
     let (restore_activity_group, restore_activity) = activity_group("Activity");
@@ -306,7 +464,7 @@ fn build_ui(application: &adw::Application) {
         .sensitive(false)
         .width_request(130)
         .build();
-    let estimate_button = gtk::Button::builder().label("Estimate").build();
+    let estimate_button = gtk::Button::builder().label("Calculate Size").build();
     let dry_run_button = gtk::Button::builder().label("Dry Run").build();
     let backup_secondary_actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -323,7 +481,6 @@ fn build_ui(application: &adw::Application) {
         .spacing(12)
         .halign(gtk::Align::Center)
         .build();
-    backup_primary_actions.append(&save_backup_button);
     backup_primary_actions.append(&backup_button);
     backup_primary_actions.append(&cancel_backup_button);
     backup_action_group.add(&backup_primary_actions);
@@ -335,18 +492,19 @@ fn build_ui(application: &adw::Application) {
     backup_target_group.add(&backup_id);
     backup_target_group.add(&archive_name);
     let files_group = adw::PreferencesGroup::builder()
-        .title("Files to Back Up")
-        .description("Only files in the selected source folder are backed up")
+        .title("Included in Back Up")
+        .description("Folders included in this PBS snapshot")
+        .header_suffix(&add_source_button)
         .build();
-    files_group.add(&source);
+    files_group.add(&source_list);
     let exclude_group = adw::PreferencesGroup::builder()
         .title("Exclude From Backup")
-        .description("The following patterns are not backed up")
+        .description("Choose common exclusions or add folder, file, and pattern rules")
         .build();
     exclude_group.add(&exclusions_row);
     let backup_tools_group = adw::PreferencesGroup::builder()
         .title("Backup Tools")
-        .description("Dry-run commands use the same PBS target without uploading data")
+        .description("Calculate size locally or run a PBS dry run without uploading data")
         .build();
     backup_tools_group.add(&backup_secondary_actions);
     backup_page.add(&backup_action_group);
@@ -359,24 +517,84 @@ fn build_ui(application: &adw::Application) {
     let schedule_page = adw::PreferencesPage::new();
     let schedule_group = adw::PreferencesGroup::builder()
         .title("Scheduled Backups")
+        .description("Schedule settings are saved with this backup")
         .build();
     let schedule_row = adw::ActionRow::builder()
         .title("Regularly Create Backups")
-        .subtitle("Scheduler and monitor are planned after the manual backup MVP")
+        .subtitle("Background monitor integration is the next scheduler step")
         .build();
-    let schedule_switch = gtk::Switch::builder()
-        .valign(gtk::Align::Center)
-        .sensitive(false)
-        .build();
+    let schedule_switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
     schedule_row.add_suffix(&schedule_switch);
-    let frequency_model = gtk::StringList::new(&["Daily", "Weekly", "Monthly"]);
+    schedule_row.set_activatable_widget(Some(&schedule_switch));
+    let frequency_model = gtk::StringList::new(&["Hourly", "Daily", "Weekly", "Monthly"]);
     let frequency_row = adw::ComboRow::builder()
         .title("Frequency")
         .model(&frequency_model)
-        .sensitive(false)
+        .selected(1)
         .build();
+    let preferred_time_row = adw::ActionRow::builder()
+        .title("Preferred Time")
+        .subtitle("Used for daily, weekly, and monthly schedules")
+        .build();
+    let schedule_hour = gtk::SpinButton::with_range(0.0, 23.0, 1.0);
+    schedule_hour.set_width_request(72);
+    schedule_hour.set_valign(gtk::Align::Center);
+    schedule_hour.set_value(17.0);
+    let time_separator = gtk::Label::new(Some(":"));
+    let schedule_minute = gtk::SpinButton::with_range(0.0, 59.0, 5.0);
+    schedule_minute.set_width_request(72);
+    schedule_minute.set_valign(gtk::Align::Center);
+    let time_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(6)
+        .valign(gtk::Align::Center)
+        .build();
+    time_box.append(&schedule_hour);
+    time_box.append(&time_separator);
+    time_box.append(&schedule_minute);
+    preferred_time_row.add_suffix(&time_box);
+    let weekday_model = gtk::StringList::new(&[
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]);
+    let weekday_row = adw::ComboRow::builder()
+        .title("Day of Week")
+        .model(&weekday_model)
+        .selected(0)
+        .build();
+    let month_day_row = adw::ActionRow::builder()
+        .title("Day of Month")
+        .subtitle("Backups scheduled after the last day run on the last day")
+        .build();
+    let schedule_month_day = gtk::SpinButton::with_range(1.0, 31.0, 1.0);
+    schedule_month_day.set_width_request(72);
+    schedule_month_day.set_valign(gtk::Align::Center);
+    schedule_month_day.set_value(1.0);
+    month_day_row.add_suffix(&schedule_month_day);
+    let run_on_battery_row = adw::ActionRow::builder()
+        .title("Run on Battery")
+        .subtitle("Allow scheduled backups when the device is not plugged in")
+        .build();
+    let schedule_run_on_battery = gtk::Switch::builder().valign(gtk::Align::Center).build();
+    run_on_battery_row.add_suffix(&schedule_run_on_battery);
+    run_on_battery_row.set_activatable_widget(Some(&schedule_run_on_battery));
+    let schedule_status_row = adw::ActionRow::builder()
+        .title("Status")
+        .subtitle("Schedule disabled")
+        .build();
+    schedule_status_row.add_prefix(&gtk::Image::from_icon_name("schedule-symbolic"));
     schedule_group.add(&schedule_row);
     schedule_group.add(&frequency_row);
+    schedule_group.add(&preferred_time_row);
+    schedule_group.add(&weekday_row);
+    schedule_group.add(&month_day_row);
+    schedule_group.add(&run_on_battery_row);
+    schedule_group.add(&schedule_status_row);
     let retention_group = adw::PreferencesGroup::builder()
         .title("Delete Old Archives")
         .description("Server-managed retention is the current default")
@@ -593,9 +811,12 @@ fn build_ui(application: &adw::Application) {
         source,
         source_button,
         source_path,
+        backup_sources,
+        source_list: source_list.clone(),
         backup_id,
         archive_name,
         exclusions,
+        exclusions_row: exclusions_row.clone(),
         check_button,
         save_backup_button,
         estimate_button,
@@ -617,6 +838,17 @@ fn build_ui(application: &adw::Application) {
         restore_destination_button,
         restore_destination_path,
         restore_pattern,
+        schedule_switch: schedule_switch.clone(),
+        schedule_frequency: frequency_row.clone(),
+        schedule_hour: schedule_hour.clone(),
+        schedule_minute: schedule_minute.clone(),
+        schedule_weekday: weekday_row.clone(),
+        schedule_month_day: schedule_month_day.clone(),
+        schedule_time_row: preferred_time_row.clone(),
+        schedule_weekday_row: weekday_row.clone(),
+        schedule_month_day_row: month_day_row.clone(),
+        schedule_run_on_battery: schedule_run_on_battery.clone(),
+        schedule_status_row: schedule_status_row.clone(),
         archive_refresh_requested,
         updating_snapshots: Rc::new(Cell::new(false)),
         server_model,
@@ -627,6 +859,8 @@ fn build_ui(application: &adw::Application) {
         backups_group: backups_group.clone(),
         backups,
         active_backup_row: Rc::new(RefCell::new(None)),
+        updating_form: Rc::new(Cell::new(false)),
+        autosave_pending: Rc::new(Cell::new(false)),
         snapshots,
         archives,
         backup_activity,
@@ -645,29 +879,43 @@ fn build_ui(application: &adw::Application) {
     connect_operation(&widgets, OperationKind::Restore);
     connect_snapshot_archive_refresh(&widgets);
     connect_cancel_buttons(&widgets);
-    connect_server_selector(&backup_server_row, &widgets);
-    connect_server_selector(&restore_server_row, &widgets);
+    connect_server_selector(&backup_server_row, &widgets, true);
+    connect_server_selector(&restore_server_row, &widgets, false);
     connect_folder_picker(
         &widgets.source,
         &widgets.source_button,
         &widgets.source_path,
         "Choose Source Folder",
     );
+    let widgets_for_add_source = widgets.clone();
+    add_source_button.connect_clicked(move |button| {
+        choose_backup_source_folder(button, &widgets_for_add_source);
+    });
     connect_folder_picker(
         &widgets.restore_destination,
         &widgets.restore_destination_button,
         &widgets.restore_destination_path,
         "Choose Restore Destination",
     );
+    update_source_list(&widgets);
+    update_exclusions_summary(&widgets);
+    update_schedule_status(&widgets);
+    let widgets_for_exclusions = widgets.clone();
+    widgets.exclusions_row.connect_activated(move |row| {
+        show_exclusions_dialog(row, &widgets_for_exclusions);
+    });
     for row in server_overview_rows.iter() {
         add_server_open_action(row, &widgets);
         add_server_delete_button(row, &widgets);
     }
     for row in backup_overview_rows.iter() {
         add_backup_open_action(row, &widgets, &navigation_view);
+        add_backup_run_button(row, &widgets);
         add_backup_delete_button(row, &widgets);
     }
     update_server_dependent_actions(&widgets);
+    connect_schedule_controls(&widgets);
+    connect_backup_autosave_controls(&widgets);
 
     connect_add_server_row(&add_server_button, &widgets);
     connect_add_server_row(&add_server_empty_row, &widgets);
@@ -682,18 +930,25 @@ fn build_ui(application: &adw::Application) {
             return;
         }
         prepare_new_backup(&widgets_for_add_backup);
-        navigation_view_for_backup.push_by_tag("backup-detail");
+        match backup_config_from_form(&widgets_for_add_backup) {
+            Ok(config) => {
+                upsert_backup_config(
+                    &widgets_for_add_backup,
+                    &config,
+                    Some(&navigation_view_for_backup),
+                );
+                save_app_settings_or_toast(&widgets_for_add_backup);
+                navigation_view_for_backup.push_by_tag("backup-detail");
+            }
+            Err(error) => widgets_for_add_backup
+                .toast_overlay
+                .add_toast(adw::Toast::new(&error)),
+        }
     };
     let add_backup = Rc::new(add_backup);
     let add_backup_for_plus = Rc::clone(&add_backup);
     add_backup_button.connect_activated(move |_| add_backup_for_plus());
     add_backup_empty_row.connect_activated(move |_| add_backup());
-
-    let widgets_for_save_backup = widgets.clone();
-    let navigation_view_for_saved_backup = navigation_view.clone();
-    widgets.save_backup_button.connect_clicked(move |_| {
-        save_backup(&widgets_for_save_backup, &navigation_view_for_saved_backup);
-    });
 
     let navigation_view_for_restore = navigation_view.clone();
     let widgets_for_restore = widgets.clone();
@@ -808,16 +1063,24 @@ fn prepare_new_server(widgets: &FormWidgets) {
 }
 
 fn prepare_new_backup(widgets: &FormWidgets) {
+    widgets.updating_form.set(true);
     widgets.active_backup_row.borrow_mut().take();
     let next = widgets.backups.borrow().len() + 1;
     widgets.backup_id.set_text(&format!("backup-{next}"));
     widgets.archive_name.set_text("home");
     widgets.source.set_text(&default_source());
+    widgets.backup_sources.replace(vec![BackupSourceConfig {
+        archive_name: "home".into(),
+        path: glib::home_dir(),
+    }]);
+    update_source_list(widgets);
     widgets
         .exclusions
         .buffer()
         .set_text(&default_home_exclusions().join("\n"));
     widgets.source_path.borrow_mut().take();
+    set_schedule_form(widgets, &ScheduleConfig::default());
+    widgets.updating_form.set(false);
     reset_activity(&widgets.backup_activity);
 }
 
@@ -925,19 +1188,21 @@ fn add_backup_overview_row(
     widgets: &FormWidgets,
     config: &BackupConfig,
     navigation_view: &adw::NavigationView,
-) {
+) -> adw::ActionRow {
     let row = overview_row(
         "drive-harddisk-symbolic",
         &config.name,
         &backup_label(config),
     );
     add_backup_open_action(&row, widgets, navigation_view);
+    add_backup_run_button(&row, widgets);
     add_backup_delete_button(&row, widgets);
     remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_button);
     remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_empty_row);
     widgets.backups_group.add(&row);
     widgets.backups_group.add(&widgets.add_backup_button);
     update_server_dependent_actions(widgets);
+    row
 }
 
 fn add_backup_open_action(
@@ -950,25 +1215,58 @@ fn add_backup_open_action(
     row.connect_activated(move |row| {
         widgets.active_backup_row.replace(Some(row.clone()));
         let name = row.title().to_string();
-        if let Some(backup) = widgets
-            .backups
-            .borrow()
-            .iter()
-            .find(|backup| backup.name == name)
-            .cloned()
-        {
-            widgets.backup_id.set_text(&backup.name);
-            widgets.archive_name.set_text(&backup.archive_name);
-            widgets.source.set_text(&backup.source);
-            widgets.source_path.borrow_mut().take();
-            widgets.server_name.set_text(&backup.server);
-            widgets
-                .exclusions
-                .buffer()
-                .set_text(&backup.exclusions.join("\n"));
+        if let Some(backup) = backup_by_name(&widgets, &name) {
+            load_backup_into_form(&widgets, &backup);
         }
         navigation_view.push_by_tag("backup-detail");
     });
+}
+
+fn add_backup_run_button(row: &adw::ActionRow, widgets: &FormWidgets) {
+    let run_button = gtk::Button::from_icon_name("media-playback-start-symbolic");
+    run_button.set_tooltip_text(Some("Back Up Now"));
+    run_button.add_css_class("flat");
+    let widgets = widgets.clone();
+    let row_for_run = row.clone();
+    run_button.connect_clicked(move |_| {
+        let name = row_for_run.title().to_string();
+        if let Some(backup) = backup_by_name(&widgets, &name) {
+            widgets.active_backup_row.replace(Some(row_for_run.clone()));
+            load_backup_into_form(&widgets, &backup);
+            start_operation(&widgets, OperationKind::Backup);
+        }
+    });
+    row.add_suffix(&run_button);
+}
+
+fn backup_by_name(widgets: &FormWidgets, name: &str) -> Option<BackupConfig> {
+    widgets
+        .backups
+        .borrow()
+        .iter()
+        .find(|backup| backup.name == name)
+        .cloned()
+}
+
+fn load_backup_into_form(widgets: &FormWidgets, backup: &BackupConfig) {
+    widgets.updating_form.set(true);
+    widgets.backup_id.set_text(&backup.name);
+    if let Some(source) = backup.sources.first() {
+        widgets.archive_name.set_text(&source.archive_name);
+        widgets
+            .source
+            .set_text(source.path.to_string_lossy().as_ref());
+    }
+    widgets.backup_sources.replace(backup.sources.clone());
+    widgets.source_path.borrow_mut().take();
+    update_source_list(widgets);
+    widgets.server_name.set_text(&backup.server);
+    widgets
+        .exclusions
+        .buffer()
+        .set_text(&backup.exclusions.join("\n"));
+    set_schedule_form(widgets, &backup.schedule);
+    widgets.updating_form.set(false);
 }
 
 fn add_backup_delete_button(row: &adw::ActionRow, widgets: &FormWidgets) {
@@ -1172,35 +1470,39 @@ fn copy_server_dialog_fields(
 }
 
 fn backup_label(config: &BackupConfig) -> String {
-    format!(
-        "{} as {}.pxar -> {}",
-        folder_label(&PathBuf::from(&config.source)),
-        config.archive_name,
-        config.server
-    )
+    let source_count = config.sources.len();
+    let first = config.sources.first();
+    let target = match (source_count, first) {
+        (0, _) => format!("No folders selected -> {}", config.server),
+        (1, Some(source)) => format!(
+            "{} as {}.pxar -> {}",
+            folder_label(&source.path),
+            source.archive_name,
+            config.server
+        ),
+        (_, Some(source)) => format!(
+            "{} and {} more -> {}",
+            folder_label(&source.path),
+            source_count - 1,
+            config.server
+        ),
+        _ => format!("No folders selected -> {}", config.server),
+    };
+    format!("{target} · {}", schedule_summary(&config.schedule))
 }
 
-fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
+fn backup_config_from_form(widgets: &FormWidgets) -> Result<BackupConfig, String> {
     let backup_id = widgets.backup_id.text().trim().to_owned();
     let archive_name = widgets.archive_name.text().trim().to_owned();
-    let source = selected_path(&widgets.source, &widgets.source_path);
+    let sources = widgets.backup_sources.borrow().clone();
     if backup_id.is_empty() {
-        widgets
-            .toast_overlay
-            .add_toast(adw::Toast::new("Backup ID is required"));
-        return;
+        return Err("Backup ID is required".into());
     }
     if archive_name.is_empty() {
-        widgets
-            .toast_overlay
-            .add_toast(adw::Toast::new("Archive name is required"));
-        return;
+        return Err("Archive name is required".into());
     }
-    if source.is_empty() {
-        widgets
-            .toast_overlay
-            .add_toast(adw::Toast::new("Source folder is required"));
-        return;
+    if sources.is_empty() {
+        return Err("Folders to back up are required".into());
     }
 
     let server = widgets.server_name.text().trim().to_owned();
@@ -1211,18 +1513,23 @@ fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
             .iter()
             .any(|saved| saved.name == server)
     {
-        widgets
-            .toast_overlay
-            .add_toast(adw::Toast::new("Server is required"));
-        return;
+        return Err("Server is required".into());
     }
-    let config = BackupConfig {
-        name: backup_id.clone(),
+
+    Ok(BackupConfig {
+        name: backup_id,
         server,
-        source,
-        archive_name,
+        sources,
         exclusions: exclusion_patterns(widgets),
-    };
+        schedule: schedule_from_form(widgets),
+    })
+}
+
+fn upsert_backup_config(
+    widgets: &FormWidgets,
+    config: &BackupConfig,
+    navigation_view: Option<&adw::NavigationView>,
+) -> bool {
     let active_row = widgets.active_backup_row.borrow().clone();
     let previous_name = active_row.as_ref().map(|row| row.title().to_string());
     let updated_existing = {
@@ -1241,23 +1548,191 @@ fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
         }
     };
 
-    if updated_existing {
-        if let Some(row) = active_row.as_ref() {
-            row.set_title(&config.name);
-            row.set_subtitle(&backup_label(&config));
-        }
-        save_app_settings_or_toast(widgets);
-        widgets
-            .toast_overlay
-            .add_toast(adw::Toast::new("Backup settings updated"));
-    } else {
-        add_backup_overview_row(widgets, &config, navigation_view);
-        widgets.active_backup_row.borrow_mut().take();
-        save_app_settings_or_toast(widgets);
-        widgets
-            .toast_overlay
-            .add_toast(adw::Toast::new("Backup settings saved"));
+    if let Some(row) = active_row.as_ref() {
+        row.set_title(&config.name);
+        row.set_subtitle(&backup_label(config));
+    } else if let Some(navigation_view) = navigation_view {
+        let row = add_backup_overview_row(widgets, config, navigation_view);
+        widgets.active_backup_row.replace(Some(row));
     }
+
+    updated_existing
+}
+
+fn autosave_current_backup(widgets: &FormWidgets) {
+    if widgets.updating_form.get() || widgets.active_backup_row.borrow().is_none() {
+        return;
+    }
+    if let Ok(config) = backup_config_from_form(widgets) {
+        upsert_backup_config(widgets, &config, None);
+        save_app_settings_or_toast(widgets);
+    }
+}
+
+fn autosave_current_backup_deferred(widgets: &FormWidgets) {
+    if widgets.updating_form.get()
+        || widgets.autosave_pending.get()
+        || widgets.active_backup_row.borrow().is_none()
+    {
+        return;
+    }
+    widgets.autosave_pending.set(true);
+    let widgets = widgets.clone();
+    glib::idle_add_local_once(move || {
+        widgets.autosave_pending.set(false);
+        autosave_current_backup(&widgets);
+    });
+}
+
+fn schedule_from_form(widgets: &FormWidgets) -> ScheduleConfig {
+    ScheduleConfig {
+        enabled: widgets.schedule_switch.is_active(),
+        frequency: ScheduleFrequency::from_selected(widgets.schedule_frequency.selected()),
+        preferred_hour: widgets.schedule_hour.value_as_int().clamp(0, 23) as u8,
+        preferred_minute: widgets.schedule_minute.value_as_int().clamp(0, 59) as u8,
+        preferred_weekday: widgets.schedule_weekday.selected().min(6) as u8,
+        preferred_month_day: widgets.schedule_month_day.value_as_int().clamp(1, 31) as u8,
+        run_on_battery: widgets.schedule_run_on_battery.is_active(),
+    }
+}
+
+fn set_schedule_form(widgets: &FormWidgets, schedule: &ScheduleConfig) {
+    widgets.schedule_switch.set_active(schedule.enabled);
+    widgets
+        .schedule_frequency
+        .set_selected(schedule.frequency.selected());
+    widgets
+        .schedule_hour
+        .set_value(schedule.preferred_hour as f64);
+    widgets
+        .schedule_minute
+        .set_value(schedule.preferred_minute as f64);
+    widgets
+        .schedule_weekday
+        .set_selected((schedule.preferred_weekday.min(6)) as u32);
+    widgets
+        .schedule_month_day
+        .set_value(schedule.preferred_month_day.clamp(1, 31) as f64);
+    widgets
+        .schedule_run_on_battery
+        .set_active(schedule.run_on_battery);
+    update_schedule_status(widgets);
+}
+
+fn update_schedule_status(widgets: &FormWidgets) {
+    let schedule = schedule_from_form(widgets);
+    widgets
+        .schedule_time_row
+        .set_visible(!matches!(schedule.frequency, ScheduleFrequency::Hourly));
+    widgets
+        .schedule_weekday_row
+        .set_visible(matches!(schedule.frequency, ScheduleFrequency::Weekly));
+    widgets
+        .schedule_month_day_row
+        .set_visible(matches!(schedule.frequency, ScheduleFrequency::Monthly));
+    widgets
+        .schedule_status_row
+        .set_subtitle(&schedule_summary(&schedule));
+}
+
+fn schedule_summary(schedule: &ScheduleConfig) -> String {
+    if !schedule.enabled {
+        return "Schedule disabled".into();
+    }
+    let battery = if schedule.run_on_battery {
+        "allowed on battery"
+    } else {
+        "plugged in preferred"
+    };
+    match schedule.frequency {
+        ScheduleFrequency::Hourly => format!("Runs hourly; {battery}. Background monitor pending."),
+        ScheduleFrequency::Daily => format!(
+            "Runs daily around {:02}:{:02}; {battery}. Background monitor pending.",
+            schedule.preferred_hour, schedule.preferred_minute
+        ),
+        ScheduleFrequency::Weekly => format!(
+            "Runs weekly on {} around {:02}:{:02}; {battery}. Background monitor pending.",
+            weekday_name(schedule.preferred_weekday),
+            schedule.preferred_hour,
+            schedule.preferred_minute
+        ),
+        ScheduleFrequency::Monthly => format!(
+            "Runs monthly on day {} around {:02}:{:02}; {battery}. Background monitor pending.",
+            schedule.preferred_month_day, schedule.preferred_hour, schedule.preferred_minute
+        ),
+    }
+}
+
+fn weekday_name(index: u8) -> &'static str {
+    match index {
+        1 => "Tuesday",
+        2 => "Wednesday",
+        3 => "Thursday",
+        4 => "Friday",
+        5 => "Saturday",
+        6 => "Sunday",
+        _ => "Monday",
+    }
+}
+
+fn connect_schedule_controls(widgets: &FormWidgets) {
+    let widgets_for_switch = widgets.clone();
+    widgets.schedule_switch.connect_active_notify(move |_| {
+        update_schedule_status(&widgets_for_switch);
+        autosave_current_backup_deferred(&widgets_for_switch);
+    });
+
+    let widgets_for_frequency = widgets.clone();
+    widgets
+        .schedule_frequency
+        .connect_selected_notify(move |_| {
+            update_schedule_status(&widgets_for_frequency);
+            autosave_current_backup_deferred(&widgets_for_frequency);
+        });
+
+    let widgets_for_hour = widgets.clone();
+    widgets.schedule_hour.connect_value_changed(move |_| {
+        update_schedule_status(&widgets_for_hour);
+        autosave_current_backup_deferred(&widgets_for_hour);
+    });
+
+    let widgets_for_minute = widgets.clone();
+    widgets.schedule_minute.connect_value_changed(move |_| {
+        update_schedule_status(&widgets_for_minute);
+        autosave_current_backup_deferred(&widgets_for_minute);
+    });
+
+    let widgets_for_weekday = widgets.clone();
+    widgets.schedule_weekday.connect_selected_notify(move |_| {
+        update_schedule_status(&widgets_for_weekday);
+        autosave_current_backup_deferred(&widgets_for_weekday);
+    });
+
+    let widgets_for_month_day = widgets.clone();
+    widgets.schedule_month_day.connect_value_changed(move |_| {
+        update_schedule_status(&widgets_for_month_day);
+        autosave_current_backup_deferred(&widgets_for_month_day);
+    });
+
+    let widgets_for_battery = widgets.clone();
+    widgets
+        .schedule_run_on_battery
+        .connect_active_notify(move |_| {
+            update_schedule_status(&widgets_for_battery);
+            autosave_current_backup_deferred(&widgets_for_battery);
+        });
+}
+
+fn connect_backup_autosave_controls(widgets: &FormWidgets) {
+    let widgets_for_id = widgets.clone();
+    widgets
+        .backup_id
+        .connect_changed(move |_| autosave_current_backup_deferred(&widgets_for_id));
+
+    let widgets_for_archive = widgets.clone();
+    widgets
+        .archive_name
+        .connect_changed(move |_| autosave_current_backup_deferred(&widgets_for_archive));
 }
 
 fn store_current_server_password_or_toast(widgets: &FormWidgets, server: &ServerConfig) -> bool {
@@ -1333,11 +1808,543 @@ fn exclusion_patterns(widgets: &FormWidgets) -> Vec<String> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+struct PredefinedExclusion {
+    title: &'static str,
+    subtitle: &'static str,
+    icon: &'static str,
+    patterns: &'static [&'static str],
+}
+
+const PREDEFINED_EXCLUSIONS: &[PredefinedExclusion] = &[
+    PredefinedExclusion {
+        title: "Caches",
+        subtitle: "Data that can be regenerated when needed",
+        icon: "folder-saved-search-symbolic",
+        patterns: &[
+            "/.cache/",
+            "/.ccache/",
+            "/.var/app/*/cache/",
+            "/.var/app/*/config/Cache/",
+            "/.var/app/*/config/Code Cache/",
+        ],
+    },
+    PredefinedExclusion {
+        title: "Trash",
+        subtitle: "Files that have not been irretrievably deleted",
+        icon: "user-trash-symbolic",
+        patterns: &["/.local/share/Trash/"],
+    },
+    PredefinedExclusion {
+        title: "Flatpak App Installations",
+        subtitle: "Documents and data are still backed up",
+        icon: "preferences-desktop-apps-symbolic",
+        patterns: &["/.local/share/flatpak/"],
+    },
+    PredefinedExclusion {
+        title: "Virtual Machines and Containers",
+        subtitle: "Might include data stored within",
+        icon: "computer-symbolic",
+        patterns: &[
+            "/.local/share/gnome-boxes/",
+            "/.var/app/org.gnome.Boxes/",
+            "/.var/app/org.gnome.BoxesDevel/",
+            "/.local/share/bottles/",
+            "/.var/app/com.usebottles.bottles/",
+            "/.local/share/libvirt/",
+            "/.config/libvirt/",
+            "/.local/share/containers/",
+            "/.local/share/docker/",
+        ],
+    },
+];
+
+#[allow(deprecated)]
+fn choose_backup_source_folder(anchor: &impl IsA<gtk::Widget>, widgets: &FormWidgets) {
+    let parent = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    let dialog = gtk::FileChooserNative::builder()
+        .title("Add Folder")
+        .action(gtk::FileChooserAction::SelectFolder)
+        .accept_label("Add")
+        .cancel_label("Cancel")
+        .modal(true)
+        .build();
+    if let Some(parent) = parent.as_ref() {
+        dialog.set_transient_for(Some(parent));
+    }
+    dialog.set_select_multiple(false);
+    if let Some(parent) = glib::home_dir().parent() {
+        let _ = dialog.set_current_folder(Some(&gio::File::for_path(parent)));
+    }
+
+    let widgets = widgets.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == gtk::ResponseType::Accept {
+            if let Some(path) = dialog.file().and_then(|folder| folder.path()) {
+                add_backup_source(&widgets, path);
+            }
+        }
+        dialog.destroy();
+    });
+    dialog.show();
+}
+
+fn add_backup_source(widgets: &FormWidgets, path: PathBuf) {
+    if !path.is_dir() {
+        widgets.toast_overlay.add_toast(adw::Toast::new(
+            "Only folders can be included in a .pxar backup",
+        ));
+        return;
+    }
+    if widgets
+        .backup_sources
+        .borrow()
+        .iter()
+        .any(|source| same_source_path(&source.path, &path))
+    {
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new("Already included in this backup"));
+        return;
+    }
+    let archive_name = unique_archive_name(
+        &widgets.backup_sources.borrow(),
+        &archive_name_for_path(&path),
+    );
+    widgets
+        .backup_sources
+        .borrow_mut()
+        .push(BackupSourceConfig { archive_name, path });
+    sync_legacy_source_fields(widgets);
+    update_source_list(widgets);
+    autosave_current_backup(widgets);
+}
+
+fn remove_backup_source(widgets: &FormWidgets, path: &Path) {
+    widgets
+        .backup_sources
+        .borrow_mut()
+        .retain(|source| source.path != path);
+    sync_legacy_source_fields(widgets);
+    update_source_list(widgets);
+    autosave_current_backup(widgets);
+}
+
+fn sync_legacy_source_fields(widgets: &FormWidgets) {
+    let previous_updating = widgets.updating_form.replace(true);
+    if let Some(source) = widgets.backup_sources.borrow().first() {
+        let archive_name = source.archive_name.as_str();
+        if widgets.archive_name.text().as_str() != archive_name {
+            widgets.archive_name.set_text(archive_name);
+        }
+        let source_path = source.path.to_string_lossy();
+        if widgets.source.text().as_str() != source_path.as_ref() {
+            widgets.source.set_text(source_path.as_ref());
+        }
+    } else {
+        if !widgets.archive_name.text().is_empty() {
+            widgets.archive_name.set_text("");
+        }
+        if !widgets.source.text().is_empty() {
+            widgets.source.set_text("");
+        }
+    }
+    widgets.source_path.borrow_mut().take();
+    widgets.updating_form.set(previous_updating);
+}
+
+fn update_source_list(widgets: &FormWidgets) {
+    while let Some(child) = widgets.source_list.first_child() {
+        widgets.source_list.remove(&child);
+    }
+
+    let sources = widgets.backup_sources.borrow().clone();
+    if sources.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("No folders selected")
+            .subtitle("Add a folder to back up")
+            .build();
+        row.add_prefix(&gtk::Image::from_icon_name("folder-symbolic"));
+        widgets.source_list.append(&row);
+        return;
+    }
+
+    for source in sources {
+        let icon = source_icon(&source.path);
+        let title = source_title(&source.path);
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(format!(
+                "{} as {}.pxar",
+                display_path(&source.path),
+                source.archive_name
+            ))
+            .build();
+        row.add_prefix(&gtk::Image::from_icon_name(icon));
+        let remove_button = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove_button.add_css_class("flat");
+        remove_button.set_tooltip_text(Some("Remove From Backup"));
+        let widgets_for_remove = widgets.clone();
+        let path_for_remove = source.path.clone();
+        remove_button.connect_clicked(move |_| {
+            remove_backup_source(&widgets_for_remove, &path_for_remove);
+        });
+        row.add_suffix(&remove_button);
+        widgets.source_list.append(&row);
+    }
+}
+
+fn same_source_path(left: &Path, right: &Path) -> bool {
+    left == right || display_path(left) == display_path(right)
+}
+
+fn source_icon(path: &Path) -> &'static str {
+    if path_is_home(path) {
+        "user-home-symbolic"
+    } else {
+        "folder-symbolic"
+    }
+}
+
+fn source_title(path: &Path) -> String {
+    if path_is_home(path) {
+        "Home".into()
+    } else {
+        folder_label(path)
+    }
+}
+
+fn path_is_home(path: &Path) -> bool {
+    path == glib::home_dir() || document_portal_leaf(path).is_some_and(|leaf| leaf == home_leaf())
+}
+
+fn home_leaf() -> String {
+    glib::home_dir()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Home")
+        .to_owned()
+}
+
+fn archive_name_for_path(path: &Path) -> String {
+    if path_is_home(path) {
+        return "home".into();
+    }
+    let stem = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or("archive");
+    sanitize_archive_name(stem)
+}
+
+fn sanitize_archive_name(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+    if sanitized.is_empty() {
+        "archive".into()
+    } else {
+        sanitized
+    }
+}
+
+fn unique_archive_name(existing: &[BackupSourceConfig], base: &str) -> String {
+    if !existing.iter().any(|source| source.archive_name == base) {
+        return base.into();
+    }
+    for index in 2.. {
+        let candidate = format!("{base}-{index}");
+        if !existing
+            .iter()
+            .any(|source| source.archive_name == candidate)
+        {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn show_exclusions_dialog(anchor: &impl IsA<gtk::Widget>, widgets: &FormWidgets) {
+    let dialog = adw::Window::builder()
+        .title("Excluded From Backup")
+        .default_width(560)
+        .modal(true)
+        .build();
+    if let Some(parent) = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok())
+    {
+        dialog.set_transient_for(Some(&parent));
+    }
+
+    let header = adw::HeaderBar::builder()
+        .title_widget(&gtk::Label::new(Some("Exclude From Backup")))
+        .show_end_title_buttons(false)
+        .build();
+    let done_button = gtk::Button::builder().label("Done").build();
+    header.pack_end(&done_button);
+
+    let page = adw::PreferencesPage::new();
+    let add_group = adw::PreferencesGroup::new();
+    let folder_row = dialog_action_row(
+        "folder-symbolic",
+        "Exclude Folders",
+        "Choose a folder to skip",
+    );
+    let file_row = dialog_action_row(
+        "text-x-generic-symbolic",
+        "Exclude Files",
+        "Choose a file to skip",
+    );
+    let pattern_row = dialog_action_row(
+        "folder-saved-search-symbolic",
+        "Exclude Pattern",
+        "Add a PBS exclude pattern",
+    );
+    add_group.add(&folder_row);
+    add_group.add(&file_row);
+    add_group.add(&pattern_row);
+    page.add(&add_group);
+
+    let suggested_group = adw::PreferencesGroup::builder()
+        .title("Suggested Exclusions")
+        .build();
+    for predefined in PREDEFINED_EXCLUSIONS {
+        let check = gtk::CheckButton::new();
+        check.add_css_class("selection-mode");
+        check.set_active(exclusion_patterns(widgets).contains(&predefined.patterns[0].to_owned()));
+        let row = adw::ActionRow::builder()
+            .title(predefined.title)
+            .subtitle(predefined.subtitle)
+            .activatable_widget(&check)
+            .build();
+        row.add_prefix(&check);
+        row.add_prefix(&gtk::Image::from_icon_name(predefined.icon));
+        let widgets_for_toggle = widgets.clone();
+        let patterns = predefined
+            .patterns
+            .iter()
+            .map(|pattern| pattern.to_string())
+            .collect::<Vec<_>>();
+        check.connect_toggled(move |button| {
+            if button.is_active() {
+                add_exclusion_patterns(&widgets_for_toggle, &patterns);
+            } else {
+                remove_exclusion_patterns(&widgets_for_toggle, &patterns);
+            }
+        });
+        suggested_group.add(&row);
+    }
+    page.add(&suggested_group);
+
+    let current_group = adw::PreferencesGroup::builder()
+        .title("Current Rules")
+        .build();
+    populate_current_exclusion_rows(&current_group, widgets);
+    page.add(&current_group);
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&page));
+    dialog.set_content(Some(&toolbar));
+
+    let dialog_for_done = dialog.clone();
+    done_button.connect_clicked(move |_| dialog_for_done.close());
+
+    let widgets_for_folder = widgets.clone();
+    folder_row.connect_activated(move |row| {
+        choose_exclusion_folder(row, &widgets_for_folder);
+    });
+    let widgets_for_file = widgets.clone();
+    file_row.connect_activated(move |row| {
+        choose_exclusion_file(row, &widgets_for_file);
+    });
+    let widgets_for_pattern = widgets.clone();
+    pattern_row.connect_activated(move |row| {
+        show_pattern_dialog(row, &widgets_for_pattern);
+    });
+
+    dialog.present();
+}
+
+fn dialog_action_row(icon: &str, title: &str, subtitle: &str) -> adw::ActionRow {
+    let row = overview_row(icon, title, subtitle);
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    row
+}
+
+fn choose_exclusion_folder(anchor: &impl IsA<gtk::Widget>, widgets: &FormWidgets) {
+    let dialog = gtk::FileDialog::builder()
+        .title("Exclude Folder")
+        .accept_label("Select")
+        .modal(true)
+        .build();
+    let parent = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    let widgets = widgets.clone();
+    dialog.select_folder(parent.as_ref(), None::<&gio::Cancellable>, move |result| {
+        if let Ok(folder) = result {
+            if let Some(path) = folder.path() {
+                add_exclusion_patterns(&widgets, &[pattern_for_path(&path, true)]);
+            }
+        }
+    });
+}
+
+fn choose_exclusion_file(anchor: &impl IsA<gtk::Widget>, widgets: &FormWidgets) {
+    let dialog = gtk::FileDialog::builder()
+        .title("Exclude File")
+        .accept_label("Select")
+        .modal(true)
+        .build();
+    let parent = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    let widgets = widgets.clone();
+    dialog.open(parent.as_ref(), None::<&gio::Cancellable>, move |result| {
+        if let Ok(file) = result {
+            if let Some(path) = file.path() {
+                add_exclusion_patterns(&widgets, &[pattern_for_path(&path, false)]);
+            }
+        }
+    });
+}
+
+fn show_pattern_dialog(anchor: &impl IsA<gtk::Widget>, widgets: &FormWidgets) {
+    let dialog = adw::Window::builder()
+        .title("Exclude Pattern")
+        .default_width(460)
+        .modal(true)
+        .build();
+    if let Some(parent) = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok())
+    {
+        dialog.set_transient_for(Some(&parent));
+    }
+    let header = adw::HeaderBar::builder()
+        .title_widget(&gtk::Label::new(Some("Exclude Pattern")))
+        .show_end_title_buttons(false)
+        .build();
+    let cancel_button = gtk::Button::builder().label("Cancel").build();
+    let add_button = gtk::Button::builder()
+        .label("Add")
+        .css_classes(["suggested-action"])
+        .sensitive(false)
+        .build();
+    header.pack_start(&cancel_button);
+    header.pack_end(&add_button);
+    let row = adw::EntryRow::builder().title("Pattern").build();
+    row.add_css_class("monospace");
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::new();
+    group.add(&row);
+    page.add(&group);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&page));
+    dialog.set_content(Some(&toolbar));
+
+    let add_for_change = add_button.clone();
+    row.connect_changed(move |row| add_for_change.set_sensitive(!row.text().trim().is_empty()));
+    let dialog_for_cancel = dialog.clone();
+    cancel_button.connect_clicked(move |_| dialog_for_cancel.close());
+    let widgets_for_add = widgets.clone();
+    let dialog_for_add = dialog.clone();
+    add_button.connect_clicked(move |_| {
+        let pattern = row.text().trim().to_owned();
+        if !pattern.is_empty() {
+            add_exclusion_patterns(&widgets_for_add, &[pattern]);
+            dialog_for_add.close();
+        }
+    });
+    dialog.present();
+}
+
+fn populate_current_exclusion_rows(group: &adw::PreferencesGroup, widgets: &FormWidgets) {
+    for pattern in exclusion_patterns(widgets) {
+        let row = adw::ActionRow::builder()
+            .title(pattern.as_str())
+            .subtitle("PBS exclude pattern")
+            .build();
+        row.add_prefix(&gtk::Image::from_icon_name("folder-saved-search-symbolic"));
+        let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+        remove.add_css_class("flat");
+        remove.set_tooltip_text(Some("Remove Exclusion"));
+        let widgets_for_remove = widgets.clone();
+        let pattern_for_remove = pattern.clone();
+        remove.connect_clicked(move |_| {
+            remove_exclusion_patterns(
+                &widgets_for_remove,
+                std::slice::from_ref(&pattern_for_remove),
+            );
+        });
+        row.add_suffix(&remove);
+        group.add(&row);
+    }
+}
+
+fn pattern_for_path(path: &Path, directory: bool) -> String {
+    let mut value = path.to_string_lossy().into_owned();
+    if directory && !value.ends_with('/') {
+        value.push('/');
+    }
+    value
+}
+
+fn add_exclusion_patterns(widgets: &FormWidgets, patterns: &[String]) {
+    let mut existing = exclusion_patterns(widgets);
+    for pattern in patterns {
+        if !existing.iter().any(|current| current == pattern) {
+            existing.push(pattern.clone());
+        }
+    }
+    set_exclusion_patterns(widgets, &existing);
+}
+
+fn remove_exclusion_patterns(widgets: &FormWidgets, patterns: &[String]) {
+    let existing = exclusion_patterns(widgets)
+        .into_iter()
+        .filter(|pattern| !patterns.iter().any(|removed| removed == pattern))
+        .collect::<Vec<_>>();
+    set_exclusion_patterns(widgets, &existing);
+}
+
+fn set_exclusion_patterns(widgets: &FormWidgets, patterns: &[String]) {
+    widgets.exclusions.buffer().set_text(&patterns.join("\n"));
+    update_exclusions_summary(widgets);
+    autosave_current_backup_deferred(widgets);
+}
+
+fn update_exclusions_summary(widgets: &FormWidgets) {
+    let patterns = exclusion_patterns(widgets);
+    widgets.exclusions_row.set_subtitle(&match patterns.len() {
+        0 => "Nothing excluded from backup".into(),
+        1 => format!("1 rule: {}", patterns[0]),
+        len => format!("{len} rules configured"),
+    });
+}
+
 fn reset_activity(activity: &ActivityWidgets) {
     activity.progress_bar.set_fraction(0.0);
     activity.phase_label.set_text("Ready");
     activity.metrics_label.set_text("No activity yet");
     activity.warning_label.set_visible(false);
+    activity.details_row.set_visible(false);
+    activity.details_row.set_expanded(false);
     activity.log_buffer.set_text("Ready");
 }
 
@@ -1390,12 +2397,13 @@ fn activity_group(title: &str) -> (adw::PreferencesGroup, ActivityWidgets) {
     let details_row = adw::ExpanderRow::builder()
         .title("Details")
         .subtitle("Raw proxmox-backup-client output")
+        .visible(false)
         .build();
     details_row.add_row(&log_scroll);
+    status_box.append(&details_row);
 
     let group = adw::PreferencesGroup::builder().title(title).build();
     group.add(&status_box);
-    group.add(&details_row);
 
     (
         group,
@@ -1404,6 +2412,7 @@ fn activity_group(title: &str) -> (adw::PreferencesGroup, ActivityWidgets) {
             phase_label,
             metrics_label,
             warning_label,
+            details_row,
             log_buffer,
         },
     )
@@ -1455,11 +2464,14 @@ fn apply_selected_server(widgets: &FormWidgets, selected: u32) {
     }
 }
 
-fn connect_server_selector(row: &adw::ComboRow, widgets: &FormWidgets) {
+fn connect_server_selector(row: &adw::ComboRow, widgets: &FormWidgets, autosave: bool) {
     let row = row.clone();
     let widgets = widgets.clone();
     row.connect_selected_notify(move |row| {
         apply_selected_server(&widgets, row.selected());
+        if autosave {
+            autosave_current_backup(&widgets);
+        }
     });
 }
 
@@ -1608,11 +2620,42 @@ fn connect_folder_picker(
 }
 
 fn folder_label(path: &std::path::Path) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    document_portal_leaf(path)
+        .or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| display_path(path))
+}
+
+fn display_path(path: &std::path::Path) -> String {
+    document_portal_display_path(path).unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+fn document_portal_display_path(path: &std::path::Path) -> Option<String> {
+    let text = path.to_string_lossy();
+    let marker = "/doc/";
+    let index = text.find(marker)?;
+    let remainder = &text[index + marker.len()..];
+    let (_, name) = remainder.split_once('/')?;
+    if name.is_empty() {
+        None
+    } else if name == home_leaf() {
+        Some(glib::home_dir().to_string_lossy().into_owned())
+    } else {
+        Some(glib::home_dir().join(name).to_string_lossy().into_owned())
+    }
+}
+
+fn document_portal_leaf(path: &std::path::Path) -> Option<String> {
+    document_portal_display_path(path).and_then(|display| {
+        Path::new(&display)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    })
 }
 
 fn selected_path(row: &adw::EntryRow, selected_path: &Rc<RefCell<Option<PathBuf>>>) -> String {
@@ -1711,7 +2754,230 @@ fn connect_operation(widgets: &FormWidgets, kind: OperationKind) {
         OperationKind::Restore => widgets.restore_button.clone(),
     };
     let widgets = widgets.clone();
-    button.connect_clicked(move |_| start_operation(&widgets, kind));
+    if matches!(kind, OperationKind::Estimate) {
+        button.connect_clicked(move |_| start_size_estimate(&widgets));
+    } else {
+        button.connect_clicked(move |_| start_operation(&widgets, kind));
+    }
+}
+
+fn start_size_estimate(widgets: &FormWidgets) {
+    sync_legacy_source_fields(widgets);
+    let sources = widgets.backup_sources.borrow().clone();
+    if sources.is_empty() {
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new("Files to back up are required"));
+        return;
+    }
+    let exclusions = exclusion_patterns(widgets);
+    let activity = widgets.backup_activity.clone();
+    widgets.active_activity.replace(activity.clone());
+    set_buttons_sensitive(widgets, false);
+    activity.progress_bar.set_fraction(0.0);
+    activity.progress_bar.pulse();
+    activity.phase_label.set_text("Calculating size");
+    activity.metrics_label.set_text("Scanning selected files");
+    activity.warning_label.set_visible(false);
+    activity.details_row.set_visible(false);
+    activity.details_row.set_expanded(false);
+    activity.log_buffer.set_text("");
+
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = calculate_backup_size(&sources, &exclusions);
+        let _ = sender.send(result);
+    });
+
+    let widgets = widgets.clone();
+    glib::timeout_add_local(Duration::from_millis(150), move || {
+        match receiver.try_recv() {
+            Ok(Ok(estimate)) => {
+                set_buttons_sensitive(&widgets, true);
+                activity.phase_label.set_text("Estimate complete");
+                activity.progress_bar.set_fraction(1.0);
+                activity.metrics_label.set_text(&format!(
+                    "{} in {} files across {} folders",
+                    ByteSize::from_bytes(estimate.bytes).display(),
+                    format_integer(estimate.files),
+                    format_integer(estimate.directories)
+                ));
+                if !estimate.warnings.is_empty() {
+                    activity.warning_label.set_text(&format!(
+                        "{} unreadable paths. See details.",
+                        estimate.warnings.len()
+                    ));
+                    activity.warning_label.set_visible(true);
+                    activity.details_row.set_visible(true);
+                    activity.log_buffer.set_text(&estimate.warnings.join("\n"));
+                }
+                widgets
+                    .toast_overlay
+                    .add_toast(adw::Toast::new("Estimate complete"));
+                glib::ControlFlow::Break
+            }
+            Ok(Err(error)) => {
+                set_buttons_sensitive(&widgets, true);
+                activity.phase_label.set_text("Estimate failed");
+                activity.metrics_label.set_text(&error);
+                activity.details_row.set_visible(true);
+                activity.log_buffer.set_text(&error);
+                widgets
+                    .toast_overlay
+                    .add_toast(adw::Toast::new("Estimate failed"));
+                glib::ControlFlow::Break
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                activity.progress_bar.pulse();
+                glib::ControlFlow::Continue
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                set_buttons_sensitive(&widgets, true);
+                activity.phase_label.set_text("Estimate failed");
+                activity
+                    .metrics_label
+                    .set_text("Size calculation stopped unexpectedly");
+                activity.details_row.set_visible(true);
+                activity
+                    .log_buffer
+                    .set_text("Size calculation stopped unexpectedly");
+                glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+#[derive(Default)]
+struct SizeEstimate {
+    bytes: u64,
+    files: u64,
+    directories: u64,
+    warnings: Vec<String>,
+}
+
+fn calculate_backup_size(
+    sources: &[BackupSourceConfig],
+    exclusions: &[String],
+) -> Result<SizeEstimate, String> {
+    if sources.is_empty() {
+        return Err("Files to back up are required".into());
+    }
+    let mut estimate = SizeEstimate::default();
+    for source in sources {
+        if !source.path.is_absolute() {
+            return Err("Backup source must be absolute".into());
+        }
+        calculate_path_size(&source.path, &source.path, exclusions, &mut estimate);
+    }
+    Ok(estimate)
+}
+
+fn calculate_path_size(
+    source: &Path,
+    path: &Path,
+    exclusions: &[String],
+    estimate: &mut SizeEstimate,
+) {
+    if path_is_excluded(source, path, exclusions) {
+        return;
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            push_estimate_warning(estimate, format!("{}: {error}", path.display()));
+            return;
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+    if metadata.is_file() {
+        estimate.files = estimate.files.saturating_add(1);
+        estimate.bytes = estimate.bytes.saturating_add(metadata.len());
+        return;
+    }
+    if metadata.is_dir() {
+        estimate.directories = estimate.directories.saturating_add(1);
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) => {
+                push_estimate_warning(estimate, format!("{}: {error}", path.display()));
+                return;
+            }
+        };
+        for entry in entries {
+            match entry {
+                Ok(entry) => calculate_path_size(source, &entry.path(), exclusions, estimate),
+                Err(error) => push_estimate_warning(estimate, error.to_string()),
+            }
+        }
+    }
+}
+
+fn push_estimate_warning(estimate: &mut SizeEstimate, warning: String) {
+    if estimate.warnings.len() < 200 {
+        estimate.warnings.push(warning);
+    }
+}
+
+fn path_is_excluded(source: &Path, path: &Path, exclusions: &[String]) -> bool {
+    let absolute = path.to_string_lossy();
+    let relative = path
+        .strip_prefix(source)
+        .map(|path| path.to_string_lossy())
+        .unwrap_or_else(|_| absolute.clone());
+    let relative = relative.trim_start_matches('/');
+    exclusions.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return false;
+        }
+        if pattern.contains('*') {
+            return wildcard_match(pattern, &absolute)
+                || wildcard_match(pattern.trim_start_matches('/'), relative);
+        }
+        if pattern.starts_with('/') && Path::new(pattern).is_absolute() {
+            let pattern = pattern.trim_end_matches('/');
+            return absolute == pattern || absolute.starts_with(&format!("{pattern}/"));
+        }
+        let relative_pattern = pattern.trim_start_matches('/').trim_end_matches('/');
+        relative == relative_pattern || relative.starts_with(&format!("{relative_pattern}/"))
+    })
+}
+
+fn format_integer(value: u64) -> String {
+    let text = value.to_string();
+    let mut output = String::new();
+    for (index, character) in text.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            output.push(',');
+        }
+        output.push(character);
+    }
+    output.chars().rev().collect()
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let parts = pattern.split('*').collect::<Vec<_>>();
+    if parts.len() == 1 {
+        return pattern == value;
+    }
+    let mut remainder = value;
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if index == 0 && !remainder.starts_with(part) {
+            return false;
+        }
+        let Some(position) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[position + part.len()..];
+    }
+    parts
+        .last()
+        .is_none_or(|part| part.is_empty() || value.ends_with(part))
 }
 
 fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
@@ -1750,6 +3016,8 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
             .metrics_label
             .set_text(&operation.command.display_for_logs());
         activity_widgets.warning_label.set_visible(false);
+        activity_widgets.details_row.set_visible(false);
+        activity_widgets.details_row.set_expanded(false);
         activity_widgets.log_buffer.set_text("");
     }
 
@@ -1809,12 +3077,14 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
                                 && matches!(kind, OperationKind::ListSnapshots)
                                 && widgets.snapshots.n_items() > 0;
                             if update_activity_panel {
-                                if output.combined_log().trim().is_empty() {
-                                    append_log_line(&activity_widgets.log_buffer, "No output");
-                                }
                                 append_log_line(
                                     &activity_widgets.log_buffer,
                                     &format!("{status} in {:.1}s", output.elapsed.as_secs_f32()),
+                                );
+                                activity_widgets.details_row.set_visible(
+                                    matches!(kind, OperationKind::DryRun)
+                                        || activity.warnings > 0
+                                        || !output.success(),
                                 );
                             }
                         }
@@ -1830,6 +3100,7 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
                             activity_widgets.phase_label.set_text(status);
                             activity_widgets.metrics_label.set_text(&error.to_string());
                             append_log_line(&activity_widgets.log_buffer, &error.to_string());
+                            activity_widgets.details_row.set_visible(true);
                         }
                     }
                 }
@@ -1914,7 +3185,7 @@ fn build_operation(widgets: &FormWidgets, kind: OperationKind) -> Result<UiOpera
     let client = PbsClient::new(pbs_client_path());
     let command = match kind {
         OperationKind::Check => client.status(&repository),
-        OperationKind::Estimate | OperationKind::DryRun | OperationKind::Backup => {
+        OperationKind::DryRun | OperationKind::Backup => {
             let mut command = client
                 .backup(&profile_from_form(widgets, &repository)?)
                 .map_err(|error| error.to_string())?;
@@ -1924,6 +3195,7 @@ fn build_operation(widgets: &FormWidgets, kind: OperationKind) -> Result<UiOpera
             }
             Ok(command)
         }
+        OperationKind::Estimate => unreachable!("Estimate uses the local size calculator"),
         OperationKind::ListSnapshots => client.snapshots(&repository, None),
         OperationKind::ListArchives => {
             let snapshot = selected_snapshot(widgets)?;
@@ -2058,19 +3330,17 @@ fn restore_patterns(widgets: &FormWidgets) -> Vec<String> {
 }
 
 fn profile_from_form(widgets: &FormWidgets, repository: &str) -> Result<BackupProfile, String> {
-    let source = selected_path(&widgets.source, &widgets.source_path);
+    sync_legacy_source_fields(widgets);
     let backup_id = widgets.backup_id.text().trim().to_owned();
-    let archive_name = widgets.archive_name.text().trim().to_owned();
-    if source.is_empty() {
-        return Err("Source folder is required".into());
+    let sources = widgets.backup_sources.borrow().clone();
+    if sources.is_empty() {
+        return Err("Files to back up are required".into());
     }
     if backup_id.is_empty() {
         return Err("Backup ID is required".into());
     }
-    if archive_name.is_empty() {
-        return Err("Archive name is required".into());
-    }
 
+    let first_source = sources.first().expect("sources checked as non-empty");
     let exclusions = exclusion_patterns(widgets);
 
     let profile = BackupProfile {
@@ -2079,8 +3349,15 @@ fn profile_from_form(widgets: &FormWidgets, repository: &str) -> Result<BackupPr
         repository: repository.to_owned(),
         namespace: None,
         backup_id,
-        archive_name,
-        source: PathBuf::from(source),
+        archive_name: first_source.archive_name.clone(),
+        source: first_source.path.clone(),
+        sources: sources
+            .into_iter()
+            .map(|source| BackupSource {
+                archive_name: source.archive_name,
+                path: source.path,
+            })
+            .collect(),
         exclusions,
         change_detection: ChangeDetection::Metadata,
         encryption: EncryptionSettings {
