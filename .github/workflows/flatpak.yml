@@ -49,6 +49,7 @@ jobs:
         env:
           FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          FLATPAK_GPG_PASSPHRASE: ${{ secrets.FLATPAK_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
 
@@ -58,8 +59,27 @@ jobs:
             exit 0
           fi
 
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          printf 'allow-loopback-pinentry\n' > ~/.gnupg/gpg-agent.conf
+          printf 'batch\nno-tty\npinentry-mode loopback\n' > ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
+
           printf '%s' "${FLATPAK_GPG_PRIVATE_KEY}" | gpg --batch --import
           gpg --batch --list-secret-keys "${FLATPAK_GPG_KEY_ID}"
+
+          if [[ -n "${FLATPAK_GPG_PASSPHRASE}" ]]; then
+            printf 'crumbs signing probe' > /tmp/crumbs-signing-probe
+            gpg \
+              --batch \
+              --yes \
+              --pinentry-mode loopback \
+              --passphrase "${FLATPAK_GPG_PASSPHRASE}" \
+              --local-user "${FLATPAK_GPG_KEY_ID}" \
+              --detach-sign \
+              /tmp/crumbs-signing-probe
+          fi
+
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: Build repository

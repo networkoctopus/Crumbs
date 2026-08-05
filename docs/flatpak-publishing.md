@@ -32,6 +32,9 @@ when a GPG signing key is configured.
    gh secret set FLATPAK_GPG_KEY_ID --body YOUR_KEY_ID
    ```
 
+   If the key has a passphrase, also add it as `FLATPAK_GPG_PASSPHRASE`. This
+   is optional for a no-passphrase CI signing key.
+
    Keep an offline backup of the private key. Delete `crumbs-flatpak-private.asc`
    from your working directory after adding the secret.
 
