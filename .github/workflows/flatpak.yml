@@ -1,0 +1,146 @@
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  APP_ID: io.github.networkoctopus.Crumbs
+  MANIFEST: io.github.networkoctopus.Crumbs.Devel.yml
+
+jobs:
+  build:
+    name: Build Flatpak
+    runs-on: ubuntu-latest
+    outputs:
+      signed: ${{ steps.gpg.outputs.signed }}
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-x11 flatpak flatpak-builder gpg
+
+      - name: Add Flathub
+        run: |
+          dbus-run-session -- flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install runtimes
+        run: |
+          dbus-run-session -- flatpak --user install -y flathub \
+            org.gnome.Platform//50 \
+            org.gnome.Sdk//50 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Import GPG signing key
+        id: gpg
+        shell: bash
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${FLATPAK_GPG_PRIVATE_KEY}" || -z "${FLATPAK_GPG_KEY_ID}" ]]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No Flatpak GPG signing secrets configured; building an unsigned repo artifact."
+            exit 0
+          fi
+
+          printf '%s' "${FLATPAK_GPG_PRIVATE_KEY}" | gpg --batch --import
+          gpg --batch --list-secret-keys "${FLATPAK_GPG_KEY_ID}"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build repository
+        shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          SIGNED: ${{ steps.gpg.outputs.signed }}
+        run: |
+          set -euo pipefail
+
+          sign_args=()
+          if [[ "${SIGNED}" == "true" ]]; then
+            sign_args+=(--gpg-sign="${FLATPAK_GPG_KEY_ID}")
+          fi
+
+          dbus-run-session -- flatpak-builder \
+            --user \
+            --force-clean \
+            --install-deps-from=flathub \
+            --repo=repo \
+            "${sign_args[@]}" \
+            build-dir \
+            "${MANIFEST}"
+
+          if [[ "${SIGNED}" == "true" ]]; then
+            flatpak build-update-repo --gpg-sign="${FLATPAK_GPG_KEY_ID}" repo
+          else
+            flatpak build-update-repo repo
+          fi
+
+      - name: Generate flatpakrepo file
+        shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          SIGNED: ${{ steps.gpg.outputs.signed }}
+        run: |
+          set -euo pipefail
+
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          repo_url="https://${GITHUB_REPOSITORY_OWNER}.github.io/${repo_name}/"
+          gpg_key=""
+          no_gpg_verify="true"
+
+          if [[ "${SIGNED}" == "true" ]]; then
+            gpg_key="$(gpg --armor --export "${FLATPAK_GPG_KEY_ID}" | base64 -w0)"
+            no_gpg_verify="false"
+          fi
+
+          python3 build-aux/render-flatpakrepo.py \
+            --template build-aux/io.github.networkoctopus.Crumbs.flatpakrepo.in \
+            --output "repo/${APP_ID}.flatpakrepo" \
+            --repo-url "${repo_url}" \
+            --gpg-key "${gpg_key}" \
+            --no-gpg-verify "${no_gpg_verify}"
+
+      - name: Build single-file bundle
+        run: |
+          flatpak build-bundle repo "${APP_ID}.flatpak" "${APP_ID}" master
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: crumbs-flatpak-bundle
+          path: ${{ env.APP_ID }}.flatpak
+
+      - name: Upload Flatpak repo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crumbs-flatpak-repo
+          path: repo
+
+      - name: Configure GitHub Pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+
+      - name: Deploy Flatpak repository to Pages
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'
+        uses: actions/deploy-pages@v4
