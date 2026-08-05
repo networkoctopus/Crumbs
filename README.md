@@ -1,8 +1,25 @@
 # Crumbs
 
-Crumbs is a friendly Proxmox Backup Server client for the GNOME desktop. It is
-intended for image-based Linux desktops where the operating system can be
-replaced or rolled back while the user's home directory remains persistent.
+Crumbs is a Proxmox Backup Server client for GNOME desktops. It is
+intended for immutable Linux desktops where the OS can be
+replaced or rolled and you just need to be selective about backing up user data.
+
+![Crumbs backup screen](data/screenshots/backup.png)
+
+## Installation
+
+You can install it by first adding this repo:
+
+```bash
+flatpak remote-add --user networkoctopus https://networkoctopus.github.io/flatpak/networkoctopus.flatpakrepo
+```
+then search for it in GNOME software.
+
+or install manually:
+
+```bash
+flatpak install --user networkoctopus io.github.networkoctopus.Crumbs
+```
 
 ## Development
 

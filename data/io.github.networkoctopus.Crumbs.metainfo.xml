@@ -28,6 +28,24 @@
   <developer id="io.github.networkoctopus">
     <name>networkoctopus</name>
   </developer>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Configure a backup target and choose what to protect.</caption>
+      <image>https://raw.githubusercontent.com/networkoctopus/Crumbs/main/data/screenshots/backup.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Manage Proxmox Backup Server connections, backups, and restores.</caption>
+      <image>https://raw.githubusercontent.com/networkoctopus/Crumbs/main/data/screenshots/overview.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Add a Proxmox Backup Server datastore.</caption>
+      <image>https://raw.githubusercontent.com/networkoctopus/Crumbs/main/data/screenshots/server.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Browse snapshots and restore files to a chosen folder.</caption>
+      <image>https://raw.githubusercontent.com/networkoctopus/Crumbs/main/data/screenshots/restore.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
     <release version="0.1.0" date="2026-08-05">
       <description>
