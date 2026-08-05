@@ -4,7 +4,11 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, BufReader};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,9 +54,29 @@ impl CommandOutput {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CancellationToken {
+    canceled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::SeqCst)
+    }
+}
+
 #[derive(Debug)]
 pub enum ExecutorError {
     Spawn { program: String, source: io::Error },
+    Canceled { elapsed: Duration },
 }
 
 impl fmt::Display for ExecutorError {
@@ -60,6 +84,9 @@ impl fmt::Display for ExecutorError {
         match self {
             Self::Spawn { program, source } => {
                 write!(formatter, "failed to run {program}: {source}")
+            }
+            Self::Canceled { elapsed } => {
+                write!(formatter, "canceled after {:.1}s", elapsed.as_secs_f32())
             }
         }
     }
@@ -69,6 +96,7 @@ impl Error for ExecutorError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Spawn { source, .. } => Some(source),
+            Self::Canceled { .. } => None,
         }
     }
 }
@@ -105,6 +133,15 @@ pub fn run_command(
 pub fn run_command_streaming(
     spec: &CommandSpec,
     environment: &CommandEnvironment,
+    on_line: impl FnMut(OutputStream, &str),
+) -> Result<CommandOutput, ExecutorError> {
+    run_command_streaming_cancelable(spec, environment, &CancellationToken::new(), on_line)
+}
+
+pub fn run_command_streaming_cancelable(
+    spec: &CommandSpec,
+    environment: &CommandEnvironment,
+    cancellation: &CancellationToken,
     mut on_line: impl FnMut(OutputStream, &str),
 ) -> Result<CommandOutput, ExecutorError> {
     let started = Instant::now();
@@ -127,25 +164,30 @@ pub fn run_command_streaming(
     spawn_reader(OutputStream::Stdout, stdout, sender.clone());
     spawn_reader(OutputStream::Stderr, stderr, sender);
 
-    let status = child.wait().map_err(|source| ExecutorError::Spawn {
-        program: spec.program.to_string_lossy().into_owned(),
-        source,
-    })?;
-
     let mut stdout = String::new();
     let mut stderr = String::new();
-    for (stream, line) in receiver {
-        on_line(stream, &line);
-        match stream {
-            OutputStream::Stdout => {
-                stdout.push_str(&line);
-                stdout.push('\n');
-            }
-            OutputStream::Stderr => {
-                stderr.push_str(&line);
-                stderr.push('\n');
-            }
+    let status = loop {
+        drain_lines(&receiver, &mut stdout, &mut stderr, &mut on_line);
+        if cancellation.is_canceled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            drain_lines(&receiver, &mut stdout, &mut stderr, &mut on_line);
+            return Err(ExecutorError::Canceled {
+                elapsed: started.elapsed(),
+            });
         }
+        if let Some(status) = child.try_wait().map_err(|source| ExecutorError::Spawn {
+            program: spec.program.to_string_lossy().into_owned(),
+            source,
+        })? {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    drop(child);
+    for (stream, line) in receiver {
+        push_line(stream, &line, &mut stdout, &mut stderr, &mut on_line);
     }
 
     Ok(CommandOutput {
@@ -154,6 +196,37 @@ pub fn run_command_streaming(
         stderr,
         elapsed: started.elapsed(),
     })
+}
+
+fn drain_lines(
+    receiver: &mpsc::Receiver<(OutputStream, String)>,
+    stdout: &mut String,
+    stderr: &mut String,
+    on_line: &mut impl FnMut(OutputStream, &str),
+) {
+    while let Ok((stream, line)) = receiver.try_recv() {
+        push_line(stream, &line, stdout, stderr, on_line);
+    }
+}
+
+fn push_line(
+    stream: OutputStream,
+    line: &str,
+    stdout: &mut String,
+    stderr: &mut String,
+    on_line: &mut impl FnMut(OutputStream, &str),
+) {
+    on_line(stream, line);
+    match stream {
+        OutputStream::Stdout => {
+            stdout.push_str(line);
+            stdout.push('\n');
+        }
+        OutputStream::Stderr => {
+            stderr.push_str(line);
+            stderr.push('\n');
+        }
+    }
 }
 
 fn spawn_reader(

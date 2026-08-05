@@ -3,7 +3,7 @@ use crate::{
         BackupProfile, ChangeDetection, CryptMode, EncryptionSettings, RetentionPolicy,
         default_home_exclusions,
     },
-    executor::{CommandEnvironment, run_command_streaming},
+    executor::{CancellationToken, CommandEnvironment, run_command_streaming_cancelable},
     pbs::{CommandSpec, PbsClient},
     pbs_output::BackupActivity,
     restore::{SnapshotFile, SnapshotSummary, parse_snapshot_files, parse_snapshot_list},
@@ -67,9 +67,16 @@ struct FormWidgets {
     estimate_button: gtk::Button,
     dry_run_button: gtk::Button,
     backup_button: gtk::Button,
+    cancel_backup_button: gtk::Button,
     list_snapshots_button: gtk::Button,
     list_archives_button: gtk::Button,
     restore_button: gtk::Button,
+    cancel_restore_button: gtk::Button,
+    add_server_button: adw::ActionRow,
+    add_server_empty_row: adw::ActionRow,
+    add_backup_button: adw::ActionRow,
+    add_backup_empty_row: adw::ActionRow,
+    restore_home_row: adw::ActionRow,
     snapshot_row: adw::ComboRow,
     archive_row: adw::ComboRow,
     restore_destination: adw::EntryRow,
@@ -83,11 +90,13 @@ struct FormWidgets {
     servers_group: adw::PreferencesGroup,
     backups_group: adw::PreferencesGroup,
     backups: Rc<RefCell<Vec<BackupConfig>>>,
+    active_backup_row: Rc<RefCell<Option<adw::ActionRow>>>,
     snapshots: Rc<gtk::StringList>,
     archives: Rc<gtk::StringList>,
     backup_activity: ActivityWidgets,
     restore_activity: ActivityWidgets,
     active_activity: Rc<RefCell<ActivityWidgets>>,
+    current_cancel: Rc<RefCell<Option<CancellationToken>>>,
     toast_overlay: adw::ToastOverlay,
 }
 
@@ -128,22 +137,39 @@ fn build_ui(application: &adw::Application) {
         .build();
     let check_button = gtk::Button::builder().label("Check Server").build();
 
-    let initial_server = ServerConfig {
+    let default_repository = default_repository();
+    let initial_server = (!default_repository.trim().is_empty()).then(|| ServerConfig {
         name: default_server_name(),
-        repository: default_repository(),
+        repository: default_repository,
         fingerprint: default_fingerprint(),
-    };
-    let server_model = Rc::new(gtk::StringList::new(&[&server_label(&initial_server)]));
-    let servers = Rc::new(RefCell::new(vec![initial_server]));
+    });
+    let initial_server_labels: Vec<String> = initial_server
+        .as_ref()
+        .map(server_label)
+        .into_iter()
+        .collect();
+    let initial_server_refs: Vec<&str> = initial_server_labels.iter().map(String::as_str).collect();
+    let server_model = Rc::new(gtk::StringList::new(&initial_server_refs));
+    let servers = Rc::new(RefCell::new(
+        initial_server.iter().cloned().collect::<Vec<_>>(),
+    ));
     let backup_server_row = adw::ComboRow::builder()
         .title("Server")
         .model(&*server_model)
-        .selected(0)
+        .selected(if initial_server.is_some() {
+            0
+        } else {
+            gtk::INVALID_LIST_POSITION
+        })
         .build();
     let restore_server_row = adw::ComboRow::builder()
         .title("Server")
         .model(&*server_model)
-        .selected(0)
+        .selected(if initial_server.is_some() {
+            0
+        } else {
+            gtk::INVALID_LIST_POSITION
+        })
         .build();
 
     let source = adw::EntryRow::builder()
@@ -193,6 +219,13 @@ fn build_ui(application: &adw::Application) {
         .halign(gtk::Align::Center)
         .width_request(210)
         .build();
+    let cancel_backup_button = gtk::Button::builder()
+        .label("Cancel")
+        .css_classes(["destructive-action", "pill"])
+        .halign(gtk::Align::Center)
+        .sensitive(false)
+        .width_request(130)
+        .build();
     let estimate_button = gtk::Button::builder().label("Estimate").build();
     let dry_run_button = gtk::Button::builder().label("Dry Run").build();
     let backup_secondary_actions = gtk::Box::builder()
@@ -212,6 +245,7 @@ fn build_ui(application: &adw::Application) {
         .build();
     backup_primary_actions.append(&save_backup_button);
     backup_primary_actions.append(&backup_button);
+    backup_primary_actions.append(&cancel_backup_button);
     backup_action_group.add(&backup_primary_actions);
     let backup_target_group = adw::PreferencesGroup::builder()
         .title("Backup Target")
@@ -311,6 +345,13 @@ fn build_ui(application: &adw::Application) {
         .halign(gtk::Align::Center)
         .width_request(210)
         .build();
+    let cancel_restore_button = gtk::Button::builder()
+        .label("Cancel")
+        .css_classes(["destructive-action", "pill"])
+        .halign(gtk::Align::Center)
+        .sensitive(false)
+        .width_request(130)
+        .build();
 
     let restore_page_content = adw::PreferencesPage::new();
     let restore_server_group = adw::PreferencesGroup::builder()
@@ -329,7 +370,14 @@ fn build_ui(application: &adw::Application) {
         .build();
     restore_group.add(&restore_destination);
     restore_group.add(&restore_pattern);
-    restore_group.add(&restore_button);
+    let restore_actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .build();
+    restore_actions.append(&restore_button);
+    restore_actions.append(&cancel_restore_button);
+    restore_group.add(&restore_actions);
     restore_page_content.add(&restore_server_group);
     restore_page_content.add(&restore_archive_group);
     restore_page_content.add(&restore_group);
@@ -377,49 +425,57 @@ fn build_ui(application: &adw::Application) {
         .title_widget(&gtk::Label::new(Some("Crumbs")))
         .build();
 
-    let add_server_button = gtk::Button::builder()
-        .label("Add Server")
-        .css_classes(["pill"])
-        .halign(gtk::Align::End)
-        .build();
-    let add_backup_button = gtk::Button::builder()
-        .label("Add Backup")
-        .css_classes(["suggested-action", "pill"])
-        .halign(gtk::Align::End)
-        .build();
-    let restore_home_button = gtk::Button::builder()
-        .label("Restore")
-        .css_classes(["pill"])
-        .halign(gtk::Align::End)
-        .build();
+    let add_server_button = section_add_button("Add Server");
+    let add_server_empty_row = empty_action_row(
+        "network-server-symbolic",
+        "Add a server",
+        "Connect to a Proxmox Backup Server datastore",
+    );
+    let add_backup_button = section_add_button("Add Backup");
+    let add_backup_empty_row = empty_action_row(
+        "drive-harddisk-symbolic",
+        "Configure a backup",
+        "Choose a server, source folder, archive name, and exclusions",
+    );
 
     let servers_group = adw::PreferencesGroup::builder().title("Servers").build();
-    let server_overview_row = overview_row(
-        "network-server-symbolic",
-        "Proxmox Backup Server",
-        &overview_server_subtitle(&server_label(&servers.borrow()[0])),
-    );
-    server_overview_row.add_suffix(&add_server_button);
-    servers_group.add(&server_overview_row);
+    let server_overview_row = initial_server.as_ref().map(|server| {
+        overview_row(
+            "network-server-symbolic",
+            &server.name,
+            &overview_server_subtitle(&server.repository),
+        )
+    });
+    if let Some(row) = server_overview_row.as_ref() {
+        servers_group.add(row);
+        servers_group.add(&add_server_button);
+    } else {
+        servers_group.add(&add_server_empty_row);
+    }
 
     let backups_group = adw::PreferencesGroup::builder().title("Backups").build();
-    let backup_overview_row = overview_row(
-        "drive-harddisk-symbolic",
-        "Home Backup",
-        &format!(
-            "{} -> {}",
-            folder_label(&PathBuf::from(default_source())),
-            default_server_name()
-        ),
-    );
-    backup_overview_row.add_suffix(&add_backup_button);
-    backups_group.add(&backup_overview_row);
-    let backups = Rc::new(RefCell::new(vec![BackupConfig {
+    let initial_backup = initial_server.as_ref().map(|server| BackupConfig {
         name: default_backup_id(),
-        server: default_server_name(),
+        server: server.name.clone(),
         source: default_source(),
         archive_name: "home".into(),
-    }]));
+    });
+    let backup_overview_row = initial_backup.as_ref().map(|backup| {
+        overview_row(
+            "drive-harddisk-symbolic",
+            &backup.name,
+            &backup_label(backup),
+        )
+    });
+    if let Some(row) = backup_overview_row.as_ref() {
+        backups_group.add(row);
+        backups_group.add(&add_backup_button);
+    } else {
+        backups_group.add(&add_backup_empty_row);
+    }
+    let backups = Rc::new(RefCell::new(
+        initial_backup.iter().cloned().collect::<Vec<_>>(),
+    ));
 
     let restore_home_group = adw::PreferencesGroup::builder().title("Restore").build();
     let restore_overview_row = overview_row(
@@ -427,7 +483,6 @@ fn build_ui(application: &adw::Application) {
         "Restore Files",
         "Browse snapshots and recover files to a chosen folder",
     );
-    restore_overview_row.add_suffix(&restore_home_button);
     restore_home_group.add(&restore_overview_row);
 
     let overview_page_content = adw::PreferencesPage::new();
@@ -463,9 +518,16 @@ fn build_ui(application: &adw::Application) {
         estimate_button,
         dry_run_button,
         backup_button,
+        cancel_backup_button,
         list_snapshots_button,
         list_archives_button,
         restore_button,
+        cancel_restore_button,
+        add_server_button: add_server_button.clone(),
+        add_server_empty_row: add_server_empty_row.clone(),
+        add_backup_button: add_backup_button.clone(),
+        add_backup_empty_row: add_backup_empty_row.clone(),
+        restore_home_row: restore_overview_row.clone(),
         snapshot_row,
         archive_row,
         restore_destination,
@@ -479,11 +541,13 @@ fn build_ui(application: &adw::Application) {
         servers_group: servers_group.clone(),
         backups_group: backups_group.clone(),
         backups,
+        active_backup_row: Rc::new(RefCell::new(None)),
         snapshots,
         archives,
         backup_activity,
         restore_activity,
         active_activity,
+        current_cancel: Rc::new(RefCell::new(None)),
         toast_overlay: toast_overlay.clone(),
     };
 
@@ -495,6 +559,7 @@ fn build_ui(application: &adw::Application) {
     connect_operation(&widgets, OperationKind::ListArchives);
     connect_operation(&widgets, OperationKind::Restore);
     connect_snapshot_archive_refresh(&widgets);
+    connect_cancel_buttons(&widgets);
     connect_server_selector(&backup_server_row, &widgets);
     connect_server_selector(&restore_server_row, &widgets);
     connect_folder_picker(
@@ -509,21 +574,35 @@ fn build_ui(application: &adw::Application) {
         &widgets.restore_destination_path,
         "Choose Restore Destination",
     );
+    if let Some(row) = server_overview_row.as_ref() {
+        add_server_open_action(row, &widgets);
+        add_server_delete_button(row, &widgets);
+    }
+    if let Some(row) = backup_overview_row.as_ref() {
+        add_backup_open_action(row, &widgets, &navigation_view);
+        add_backup_delete_button(row, &widgets);
+    }
+    update_server_dependent_actions(&widgets);
 
-    let widgets_for_add_server = widgets.clone();
-    let server_overview_row_for_dialog = server_overview_row.clone();
-    add_server_button.connect_clicked(move |button| {
-        show_server_dialog(
-            button,
-            &widgets_for_add_server,
-            &server_overview_row_for_dialog,
-        );
-    });
+    connect_add_server_row(&add_server_button, &widgets);
+    connect_add_server_row(&add_server_empty_row, &widgets);
 
     let navigation_view_for_backup = navigation_view.clone();
-    add_backup_button.connect_clicked(move |_| {
+    let widgets_for_add_backup = widgets.clone();
+    let add_backup = move || {
+        if !has_servers(&widgets_for_add_backup) {
+            widgets_for_add_backup
+                .toast_overlay
+                .add_toast(adw::Toast::new("Server is required"));
+            return;
+        }
+        prepare_new_backup(&widgets_for_add_backup);
         navigation_view_for_backup.push_by_tag("backup-detail");
-    });
+    };
+    let add_backup = Rc::new(add_backup);
+    let add_backup_for_plus = Rc::clone(&add_backup);
+    add_backup_button.connect_activated(move |_| add_backup_for_plus());
+    add_backup_empty_row.connect_activated(move |_| add_backup());
 
     let widgets_for_save_backup = widgets.clone();
     let navigation_view_for_saved_backup = navigation_view.clone();
@@ -533,7 +612,13 @@ fn build_ui(application: &adw::Application) {
 
     let navigation_view_for_restore = navigation_view.clone();
     let widgets_for_restore = widgets.clone();
-    restore_home_button.connect_clicked(move |_| {
+    restore_overview_row.connect_activated(move |_| {
+        if !has_servers(&widgets_for_restore) {
+            widgets_for_restore
+                .toast_overlay
+                .add_toast(adw::Toast::new("Add a server first"));
+            return;
+        }
         navigation_view_for_restore.push_by_tag("restore");
         reset_activity(&widgets_for_restore.restore_activity);
         start_operation(&widgets_for_restore, OperationKind::ListSnapshots);
@@ -549,13 +634,285 @@ fn build_ui(application: &adw::Application) {
     window.present();
 }
 
-fn show_server_dialog(button: &gtk::Button, widgets: &FormWidgets, overview_row: &adw::ActionRow) {
+fn section_add_button(tooltip: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().activatable(true).build();
+    row.set_tooltip_text(Some(tooltip));
+    let icon = gtk::Image::from_icon_name("list-add-symbolic");
+    icon.add_css_class("heading");
+    let box_ = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::Center)
+        .height_request(44)
+        .build();
+    box_.append(&icon);
+    row.set_child(Some(&box_));
+    row
+}
+
+fn empty_action_row(icon_name: &str, title: &str, subtitle: &str) -> adw::ActionRow {
+    overview_row(icon_name, title, subtitle)
+}
+
+fn has_servers(widgets: &FormWidgets) -> bool {
+    !widgets.servers.borrow().is_empty()
+}
+
+fn has_backups(widgets: &FormWidgets) -> bool {
+    !widgets.backups.borrow().is_empty()
+}
+
+fn add_row_if_detached(group: &adw::PreferencesGroup, row: &adw::ActionRow) {
+    if row.parent().is_none() {
+        group.add(row);
+    }
+}
+
+fn remove_row_if_attached(group: &adw::PreferencesGroup, row: &adw::ActionRow) {
+    if row.parent().is_some() {
+        group.remove(row);
+    }
+}
+
+fn update_server_dependent_actions(widgets: &FormWidgets) {
+    let has_servers = has_servers(widgets);
+    let has_backups = has_backups(widgets);
+
+    if has_servers {
+        remove_row_if_attached(&widgets.servers_group, &widgets.add_server_empty_row);
+        add_row_if_detached(&widgets.servers_group, &widgets.add_server_button);
+    } else {
+        remove_row_if_attached(&widgets.servers_group, &widgets.add_server_button);
+        add_row_if_detached(&widgets.servers_group, &widgets.add_server_empty_row);
+    }
+
+    if has_backups {
+        remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_empty_row);
+        add_row_if_detached(&widgets.backups_group, &widgets.add_backup_button);
+    } else {
+        remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_button);
+        add_row_if_detached(&widgets.backups_group, &widgets.add_backup_empty_row);
+    }
+
+    widgets.add_backup_button.set_sensitive(has_servers);
+    widgets.add_backup_empty_row.set_sensitive(has_servers);
+    if has_servers {
+        widgets.add_backup_empty_row.remove_css_class("dim-label");
+        widgets.restore_home_row.remove_css_class("dim-label");
+    } else {
+        widgets.add_backup_empty_row.add_css_class("dim-label");
+        widgets.restore_home_row.add_css_class("dim-label");
+    }
+    widgets.restore_home_row.set_sensitive(has_servers);
+    widgets.save_backup_button.set_sensitive(has_servers);
+}
+
+fn connect_add_server_row(row: &adw::ActionRow, widgets: &FormWidgets) {
+    let widgets = widgets.clone();
+    row.connect_activated(move |row| {
+        prepare_new_server(&widgets);
+        show_server_dialog(row, &widgets, row);
+    });
+}
+
+fn prepare_new_server(widgets: &FormWidgets) {
+    let next = widgets.servers.borrow().len() + 1;
+    widgets.server_name.set_text(&format!("PBS Server {next}"));
+    widgets.repository.set_text("");
+    widgets.password.set_text("");
+    widgets.fingerprint.set_text("");
+}
+
+fn prepare_new_backup(widgets: &FormWidgets) {
+    widgets.active_backup_row.borrow_mut().take();
+    let next = widgets.backups.borrow().len() + 1;
+    widgets.backup_id.set_text(&format!("backup-{next}"));
+    widgets.archive_name.set_text("home");
+    widgets.source.set_text(&default_source());
+    widgets.source_path.borrow_mut().take();
+    reset_activity(&widgets.backup_activity);
+}
+
+fn add_server_overview_row(widgets: &FormWidgets, server: &ServerConfig) {
+    let row = overview_row("network-server-symbolic", &server.name, &server.repository);
+    add_server_open_action(&row, widgets);
+    add_server_delete_button(&row, widgets);
+    remove_row_if_attached(&widgets.servers_group, &widgets.add_server_button);
+    remove_row_if_attached(&widgets.servers_group, &widgets.add_server_empty_row);
+    widgets.servers_group.add(&row);
+    update_server_dependent_actions(widgets);
+}
+
+fn add_server_open_action(row: &adw::ActionRow, widgets: &FormWidgets) {
+    let widgets = widgets.clone();
+    row.connect_activated(move |row| {
+        let name = row.title().to_string();
+        if let Some(server) = widgets
+            .servers
+            .borrow()
+            .iter()
+            .find(|server| server.name == name)
+            .cloned()
+        {
+            widgets.server_name.set_text(&server.name);
+            widgets.repository.set_text(&server.repository);
+            widgets.fingerprint.set_text(&server.fingerprint);
+            show_server_dialog(row, &widgets, row);
+        }
+    });
+}
+
+fn add_server_delete_button(row: &adw::ActionRow, widgets: &FormWidgets) {
+    let delete_button = gtk::Button::from_icon_name("user-trash-symbolic");
+    delete_button.set_tooltip_text(Some("Delete Server"));
+    delete_button.add_css_class("flat");
+    let widgets = widgets.clone();
+    let row_for_delete = row.clone();
+    delete_button.connect_clicked(move |button| {
+        confirm_destructive(
+            button,
+            "Delete Server?",
+            "This removes the server from Crumbs on this device.",
+            "Delete",
+            {
+                let widgets = widgets.clone();
+                let row_for_delete = row_for_delete.clone();
+                move || delete_server(&widgets, &row_for_delete)
+            },
+        );
+    });
+    row.add_suffix(&delete_button);
+}
+
+fn delete_server(widgets: &FormWidgets, row: &adw::ActionRow) {
+    let server_name = row.title().to_string();
+    let removed_index = {
+        let mut servers = widgets.servers.borrow_mut();
+        servers
+            .iter()
+            .position(|server| server.name == server_name)
+            .inspect(|index| {
+                servers.remove(*index);
+            })
+    };
+
+    if let Some(index) = removed_index {
+        if widgets.server_model.n_items() > index as u32 {
+            widgets.server_model.remove(index as u32);
+        }
+        if widgets.servers.borrow().is_empty() {
+            widgets.server_name.set_text("");
+            widgets.repository.set_text("");
+            widgets.password.set_text("");
+            widgets.fingerprint.set_text("");
+        }
+        widgets.servers_group.remove(row);
+        update_server_dependent_actions(widgets);
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new("Server deleted"));
+    }
+}
+
+fn add_backup_overview_row(
+    widgets: &FormWidgets,
+    config: &BackupConfig,
+    navigation_view: &adw::NavigationView,
+) {
+    let row = overview_row(
+        "drive-harddisk-symbolic",
+        &config.name,
+        &backup_label(config),
+    );
+    add_backup_open_action(&row, widgets, navigation_view);
+    add_backup_delete_button(&row, widgets);
+    remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_button);
+    remove_row_if_attached(&widgets.backups_group, &widgets.add_backup_empty_row);
+    widgets.backups_group.add(&row);
+    update_server_dependent_actions(widgets);
+}
+
+fn add_backup_open_action(
+    row: &adw::ActionRow,
+    widgets: &FormWidgets,
+    navigation_view: &adw::NavigationView,
+) {
+    let widgets = widgets.clone();
+    let navigation_view = navigation_view.clone();
+    row.connect_activated(move |row| {
+        widgets.active_backup_row.replace(Some(row.clone()));
+        let name = row.title().to_string();
+        if let Some(backup) = widgets
+            .backups
+            .borrow()
+            .iter()
+            .find(|backup| backup.name == name)
+            .cloned()
+        {
+            widgets.backup_id.set_text(&backup.name);
+            widgets.archive_name.set_text(&backup.archive_name);
+            widgets.source.set_text(&backup.source);
+            widgets.source_path.borrow_mut().take();
+            widgets.server_name.set_text(&backup.server);
+        }
+        navigation_view.push_by_tag("backup-detail");
+    });
+}
+
+fn add_backup_delete_button(row: &adw::ActionRow, widgets: &FormWidgets) {
+    let delete_button = gtk::Button::from_icon_name("user-trash-symbolic");
+    delete_button.set_tooltip_text(Some("Delete Backup"));
+    delete_button.add_css_class("flat");
+    let widgets = widgets.clone();
+    let row_for_delete = row.clone();
+    delete_button.connect_clicked(move |button| {
+        confirm_destructive(
+            button,
+            "Delete Backup?",
+            "This removes the backup settings from Crumbs on this device.",
+            "Delete",
+            {
+                let widgets = widgets.clone();
+                let row_for_delete = row_for_delete.clone();
+                move || delete_backup(&widgets, &row_for_delete)
+            },
+        );
+    });
+    row.add_suffix(&delete_button);
+}
+
+fn delete_backup(widgets: &FormWidgets, row: &adw::ActionRow) {
+    let backup_name = row.title().to_string();
+    let removed = {
+        let mut backups = widgets.backups.borrow_mut();
+        backups
+            .iter()
+            .position(|backup| backup.name == backup_name)
+            .inspect(|index| {
+                backups.remove(*index);
+            })
+            .is_some()
+    };
+
+    if removed {
+        widgets.backups_group.remove(row);
+        update_server_dependent_actions(widgets);
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new("Backup deleted"));
+    }
+}
+
+fn show_server_dialog(
+    anchor: &impl IsA<gtk::Widget>,
+    widgets: &FormWidgets,
+    overview_row: &adw::ActionRow,
+) {
     let dialog = adw::Window::builder()
-        .title("Add Server")
+        .title("Server Settings")
         .default_width(520)
         .modal(true)
         .build();
-    if let Some(parent) = button
+    if let Some(parent) = anchor
         .root()
         .and_then(|root| root.downcast::<gtk::Window>().ok())
     {
@@ -563,7 +920,7 @@ fn show_server_dialog(button: &gtk::Button, widgets: &FormWidgets, overview_row:
     }
 
     let header = adw::HeaderBar::builder()
-        .title_widget(&gtk::Label::new(Some("Add Server")))
+        .title_widget(&gtk::Label::new(Some("Server Settings")))
         .show_end_title_buttons(false)
         .build();
     let close_button = gtk::Button::builder().label("Cancel").build();
@@ -571,6 +928,7 @@ fn show_server_dialog(button: &gtk::Button, widgets: &FormWidgets, overview_row:
     let save_button = gtk::Button::builder()
         .label("Save")
         .css_classes(["suggested-action"])
+        .sensitive(false)
         .build();
     header.pack_end(&save_button);
 
@@ -590,6 +948,7 @@ fn show_server_dialog(button: &gtk::Button, widgets: &FormWidgets, overview_row:
         .title("Certificate Fingerprint")
         .text(widgets.fingerprint.text())
         .build();
+    connect_server_dialog_validation(&save_button, &name_row, &server_row, &password_row);
     let check_button = gtk::Button::builder().label("Check Server").build();
 
     let page = adw::PreferencesPage::new();
@@ -646,6 +1005,44 @@ fn show_server_dialog(button: &gtk::Button, widgets: &FormWidgets, overview_row:
     dialog.present();
 }
 
+fn connect_server_dialog_validation(
+    save_button: &gtk::Button,
+    name: &adw::EntryRow,
+    server: &adw::EntryRow,
+    password: &adw::PasswordEntryRow,
+) {
+    update_server_dialog_save_button(save_button, name, server, password);
+    for row in [name, server] {
+        let save_button = save_button.clone();
+        let name = name.clone();
+        let server = server.clone();
+        let password = password.clone();
+        row.connect_changed(move |_| {
+            update_server_dialog_save_button(&save_button, &name, &server, &password);
+        });
+    }
+    let save_button = save_button.clone();
+    let name = name.clone();
+    let server = server.clone();
+    let password_for_signal = password.clone();
+    password.connect_changed(move |_| {
+        update_server_dialog_save_button(&save_button, &name, &server, &password_for_signal);
+    });
+}
+
+fn update_server_dialog_save_button(
+    save_button: &gtk::Button,
+    name: &adw::EntryRow,
+    server: &adw::EntryRow,
+    password: &adw::PasswordEntryRow,
+) {
+    save_button.set_sensitive(
+        !name.text().trim().is_empty()
+            && !server.text().trim().is_empty()
+            && !password.text().is_empty(),
+    );
+}
+
 fn copy_server_dialog_fields(
     widgets: &FormWidgets,
     name: &adw::EntryRow,
@@ -692,37 +1089,52 @@ fn save_backup(widgets: &FormWidgets, navigation_view: &adw::NavigationView) {
     }
 
     let server = widgets.server_name.text().trim().to_owned();
-    let server = if server.is_empty() {
-        default_server_name()
-    } else {
-        server
-    };
+    if server.is_empty()
+        || !widgets
+            .servers
+            .borrow()
+            .iter()
+            .any(|saved| saved.name == server)
+    {
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new("Server is required"));
+        return;
+    }
     let config = BackupConfig {
         name: backup_id.clone(),
         server,
         source,
         archive_name,
     };
-    let subtitle = backup_label(&config);
-    let mut backups = widgets.backups.borrow_mut();
-    if let Some(existing) = backups.iter_mut().find(|backup| backup.name == config.name) {
-        *existing = config;
+    let active_row = widgets.active_backup_row.borrow().clone();
+    let previous_name = active_row.as_ref().map(|row| row.title().to_string());
+    let updated_existing = {
+        let mut backups = widgets.backups.borrow_mut();
+        if let Some(existing) = backups.iter_mut().find(|backup| {
+            previous_name
+                .as_ref()
+                .is_some_and(|name| backup.name == *name)
+                || backup.name == config.name
+        }) {
+            *existing = config.clone();
+            true
+        } else {
+            backups.push(config.clone());
+            false
+        }
+    };
+
+    if updated_existing {
+        if let Some(row) = active_row.as_ref() {
+            row.set_title(&config.name);
+            row.set_subtitle(&backup_label(&config));
+        }
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Backup settings updated"));
     } else {
-        let row = overview_row("drive-harddisk-symbolic", &config.name, &subtitle);
-        let open_button = gtk::Button::builder()
-            .label("Open")
-            .css_classes(["pill"])
-            .build();
-        let navigation_view = navigation_view.clone();
-        open_button.connect_clicked(move |_| {
-            navigation_view.push_by_tag("backup-detail");
-        });
-        row.add_suffix(&open_button);
-        widgets.backups_group.add(&row);
-        backups.push(config);
+        add_backup_overview_row(widgets, &config, navigation_view);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Backup settings saved"));
@@ -809,7 +1221,7 @@ fn overview_row(icon_name: &str, title: &str, subtitle: &str) -> adw::ActionRow 
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle(subtitle)
-        .activatable(false)
+        .activatable(true)
         .build();
     let icon = gtk::Image::from_icon_name(icon_name);
     row.add_prefix(&icon);
@@ -833,6 +1245,9 @@ fn server_label(server: &ServerConfig) -> String {
 }
 
 fn apply_selected_server(widgets: &FormWidgets, selected: u32) {
+    if selected == gtk::INVALID_LIST_POSITION {
+        return;
+    }
     if let Some(server) = widgets.servers.borrow().get(selected as usize) {
         widgets.server_name.set_text(&server.name);
         widgets.repository.set_text(&server.repository);
@@ -864,6 +1279,12 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
             .add_toast(adw::Toast::new("Server is required"));
         return;
     }
+    if widgets.password.text().is_empty() {
+        widgets
+            .toast_overlay
+            .add_toast(adw::Toast::new("Password is required"));
+        return;
+    }
 
     let server = ServerConfig {
         name,
@@ -871,22 +1292,32 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
         fingerprint,
     };
     let label = server_label(&server);
-    let mut servers = widgets.servers.borrow_mut();
-    if let Some((index, existing)) = servers
-        .iter_mut()
-        .enumerate()
-        .find(|(_, existing)| existing.name == server.name)
-    {
-        *existing = server;
+    let previous_name = primary_overview_row.title().to_string();
+    let updated_index =
+        {
+            let mut servers = widgets.servers.borrow_mut();
+            if let Some((index, existing)) = servers.iter_mut().enumerate().find(|(_, existing)| {
+                existing.name == previous_name || existing.name == server.name
+            }) {
+                *existing = server.clone();
+                Some(index)
+            } else {
+                servers.push(server.clone());
+                None
+            }
+        };
+
+    if let Some(index) = updated_index {
+        primary_overview_row.set_title(&server.name);
+        primary_overview_row.set_subtitle(&server.repository);
         widgets.server_model.splice(index as u32, 1, &[&label]);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server updated"));
+        update_server_dependent_actions(widgets);
     } else {
-        let row = overview_row("network-server-symbolic", &server.name, &server.repository);
-        servers.push(server);
+        add_server_overview_row(widgets, &server);
         widgets.server_model.append(&label);
-        widgets.servers_group.add(&row);
         widgets
             .toast_overlay
             .add_toast(adw::Toast::new("Server added"));
@@ -894,12 +1325,41 @@ fn save_server(widgets: &FormWidgets, primary_overview_row: &adw::ActionRow) {
             .snapshot_row
             .set_selected(gtk::INVALID_LIST_POSITION);
         widgets.archive_row.set_selected(gtk::INVALID_LIST_POSITION);
-        drop(servers);
+        update_server_dependent_actions(widgets);
         primary_overview_row.set_subtitle(&overview_server_subtitle(&label));
         return;
     }
-    drop(servers);
     primary_overview_row.set_subtitle(&overview_server_subtitle(&label));
+}
+
+fn confirm_destructive(
+    anchor: &impl IsA<gtk::Widget>,
+    heading: &str,
+    body: &str,
+    action_label: &str,
+    action: impl FnOnce() + 'static,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(heading)
+        .body(body)
+        .close_response("cancel")
+        .default_response("cancel")
+        .build();
+    dialog.add_responses(&[("cancel", "Cancel"), ("confirm", action_label)]);
+    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+
+    let parent = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    dialog.choose(
+        parent.as_ref(),
+        None::<&gio::Cancellable>,
+        move |response| {
+            if response.as_str() == "confirm" {
+                action();
+            }
+        },
+    );
 }
 
 fn folder_button(tooltip: &str) -> gtk::Button {
@@ -1004,6 +1464,36 @@ fn should_toast(kind: OperationKind) -> bool {
     !is_browse_operation(kind)
 }
 
+fn connect_cancel_buttons(widgets: &FormWidgets) {
+    for button in [
+        &widgets.cancel_backup_button,
+        &widgets.cancel_restore_button,
+    ] {
+        let widgets = widgets.clone();
+        button.connect_clicked(move |button| {
+            confirm_destructive(
+                button,
+                "Cancel Operation?",
+                "The running proxmox-backup-client process will be stopped.",
+                "Cancel Operation",
+                {
+                    let widgets = widgets.clone();
+                    move || {
+                        if let Some(cancel) = widgets.current_cancel.borrow().as_ref() {
+                            cancel.cancel();
+                            widgets
+                                .active_activity
+                                .borrow()
+                                .phase_label
+                                .set_text("Cancelling");
+                        }
+                    }
+                },
+            );
+        });
+    }
+}
+
 fn connect_operation(widgets: &FormWidgets, kind: OperationKind) {
     let button = match kind {
         OperationKind::Check => widgets.check_button.clone(),
@@ -1035,9 +1525,17 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
     widgets.estimate_button.set_sensitive(false);
     widgets.dry_run_button.set_sensitive(false);
     widgets.backup_button.set_sensitive(false);
+    widgets
+        .cancel_backup_button
+        .set_sensitive(matches!(kind, OperationKind::Backup));
     widgets.list_snapshots_button.set_sensitive(false);
     widgets.list_archives_button.set_sensitive(false);
     widgets.restore_button.set_sensitive(false);
+    widgets
+        .cancel_restore_button
+        .set_sensitive(matches!(kind, OperationKind::Restore));
+    let cancellation = CancellationToken::new();
+    widgets.current_cancel.replace(Some(cancellation.clone()));
     if update_activity_panel {
         activity_widgets.progress_bar.set_fraction(0.0);
         activity_widgets.progress_bar.pulse();
@@ -1052,14 +1550,18 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut activity = BackupActivity::new();
-        let result =
-            run_command_streaming(&operation.command, &operation.environment, |_, line| {
+        let result = run_command_streaming_cancelable(
+            &operation.command,
+            &operation.environment,
+            &cancellation,
+            |_, line| {
                 activity.apply_line(line);
                 let _ = sender.send(OperationMessage::Line {
                     line: line.to_owned(),
                     activity: activity.clone(),
                 });
-            });
+            },
+        );
         let _ = sender.send(OperationMessage::Finished { result, activity });
     });
 
@@ -1077,6 +1579,9 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
                 }
                 OperationMessage::Finished { result, activity } => {
                     set_buttons_sensitive(&widgets, true);
+                    widgets.cancel_backup_button.set_sensitive(false);
+                    widgets.cancel_restore_button.set_sensitive(false);
+                    widgets.current_cancel.borrow_mut().take();
                     finished = true;
                     match result {
                         Ok(output) => {
@@ -1108,8 +1613,15 @@ fn start_operation(widgets: &FormWidgets, kind: OperationKind) {
                             }
                         }
                         Err(error) => {
-                            widgets.toast_overlay.add_toast(adw::Toast::new("Failed"));
-                            activity_widgets.phase_label.set_text("Failed");
+                            let status =
+                                if matches!(error, crate::executor::ExecutorError::Canceled { .. })
+                                {
+                                    "Canceled"
+                                } else {
+                                    "Failed"
+                                };
+                            widgets.toast_overlay.add_toast(adw::Toast::new(status));
+                            activity_widgets.phase_label.set_text(status);
                             activity_widgets.metrics_label.set_text(&error.to_string());
                             append_log_line(&activity_widgets.log_buffer, &error.to_string());
                         }
@@ -1147,9 +1659,11 @@ fn set_buttons_sensitive(widgets: &FormWidgets, sensitive: bool) {
     widgets.estimate_button.set_sensitive(sensitive);
     widgets.dry_run_button.set_sensitive(sensitive);
     widgets.backup_button.set_sensitive(sensitive);
+    widgets.cancel_backup_button.set_sensitive(false);
     widgets.list_snapshots_button.set_sensitive(sensitive);
     widgets.list_archives_button.set_sensitive(sensitive);
     widgets.restore_button.set_sensitive(sensitive);
+    widgets.cancel_restore_button.set_sensitive(false);
 }
 
 fn update_activity(widgets: &ActivityWidgets, activity: &BackupActivity) {

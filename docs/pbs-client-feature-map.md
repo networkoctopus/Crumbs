@@ -46,7 +46,7 @@ Status legend:
    - Done: capture stdout, stderr, exit status, and elapsed time.
    - Done: return structured success/failure results.
    - Done: basic executor tests cover command execution and environment injection.
-   - Next: support cancellation.
+   - Done: support cancellation by terminating the running child process through a cancellation token.
    - Done: parse observed PBS output into compact activity status, progress, warning count, and estimates.
 
 5. Flatpak packaging: Partial
@@ -64,9 +64,14 @@ Status legend:
    - Done: the home screen is organized around PBS-shaped Servers, Backups, and Restore sections.
    - Done: the home screen uses Pika-inspired overview rows with icons and backup/server previews.
    - Done: Add Server opens a modal setup flow instead of expanding fields on the home page.
-   - Done: named servers can be added to the in-session server list, shown on the home page, and selected from Backup or Restore.
+   - Done: named servers can be added repeatedly to the in-session server list, shown on the home page, and selected from Backup or Restore.
+   - Done: Servers and Backups sections keep a full-width centered plus button at the bottom for adding more items.
+   - Done: server and backup rows expose delete actions in the in-session lists.
+   - Done: server, backup, and restore rows are activatable; clicking the row opens that item while trash stays as a separate suffix action.
+   - Done: backup creation and restore entry are disabled while no server is configured.
+   - Done: delete and cancel actions ask for confirmation before continuing.
    - Done: Backup targets open a detail view with Backup and Schedule tabs.
-   - Done: backup settings can be saved in-session so additional backup rows appear on the home page.
+   - Done: backup settings can be saved repeatedly in-session so additional backup rows appear on the home page.
    - Next: save non-secret server and backup fields through profile persistence.
    - Next: add Secret Service persistence for credentials.
    - Later: expand setup into a proper guided Pika/Deja Dup-style flow with namespace, encryption, and retention controls.
@@ -74,6 +79,7 @@ Status legend:
 7. Manual backup UI: Partial
    - Done: first GUI provides Check Connection, Estimate, Dry Run, Back Up Now, and details.
    - Done: Backup controls now live in a dedicated Backup tab with server, source, archive, and exclusion groups.
+   - Done: Backup and Restore actions expose confirmed Cancel controls for running operations.
    - Done: dry run and backup use metadata change detection and server-managed retention.
    - Done: raw PBS output is tucked into Details in the Backup tab while the main view shows compact status, progress, processed/uploaded amounts, and warnings.
    - Next: show last backup status and profile overview.
