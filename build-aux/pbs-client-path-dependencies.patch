@@ -1,46 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Thomas Lamprecht <thomas@lamprecht.org>
-Date: Wed, 18 May 2022 08:41:14 +0200
-Subject: [PATCH] re-route dependencies not available on crates.io to git repos
+From: Crumbs update workflow <noreply@git.networkoctopus.com>
+Subject: [PATCH] route PBS client dependencies to local source trees
 
-Signed-off-by: Thomas Lamprecht <thomas@lamprecht.org>
+Generated from the Proxmox dependency-routing patch for the pinned PBS release.
 ---
- Cargo.toml | 146 ++++++++++++-------------------------------------------------
- 1 file changed, 27 insertions(+), 119 deletions(-)
-
 diff --git a/Cargo.toml b/Cargo.toml
-index 4b1671ea..086de77a 100644
+index a886095..7daf494 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -41,8 +41,6 @@ members = [
- 
-     "proxmox-backup-banner",
-     "proxmox-backup-client",
+@@ -44,2 +43,0 @@ members = [
 -    "proxmox-file-restore",
 -    "proxmox-restore-daemon",
- 
-     "pxar-bin",
- ]
-@@ -120,7 +114,6 @@ pbs-tools = { path = "pbs-tools" }
- # regular crates
- anyhow = "1.0"
- async-trait = "0.1.56"
+@@ -125 +122,0 @@ async-trait = "0.1.56"
 -apt-pkg-native = "0.3.2"
- bitflags = "2.4"
- bytes = "1.0"
- cidr = "0.3"
-@@ -133,7 +126,6 @@ flate2 = "1.0"
- foreign-types = "0.3"
- futures = "0.3"
- h2 = { version = "0.4", features = [ "stream" ] }
+@@ -138 +134,0 @@ h2 = { version = "0.4", features = [ "stream" ] }
 -handlebars = "3.0"
- hex = "0.4.3"
- hickory-resolver = { version = "0.24.1", default-features = false, features = [ "system-config", "tokio-runtime" ] }
- http-body-util = "0.1"
-@@ -172,163 +172,64 @@ xdg = "2.2"
- zstd = "0.13"
- zstd-safe = "7"
- 
+@@ -177,101 +172,0 @@ zstd-safe = "7"
 -[dependencies]
 -anyhow.workspace = true
 -async-trait.workspace = true
@@ -81,8 +56,8 @@ index 4b1671ea..086de77a 100644
 -walkdir.workspace = true
 -zstd.workspace = true
 -
- #valgrind_request = { git = "https://github.com/edef1c/libvalgrind_request", version = "1.1.0", optional = true }
- 
+-#valgrind_request = { git = "https://github.com/edef1c/libvalgrind_request", version = "1.1.0", optional = true }
+-
 -# proxmox workspace
 -proxmox-apt.workspace = true
 -proxmox-apt-api-types.workspace = true
@@ -117,6 +92,7 @@ index 4b1671ea..086de77a 100644
 -proxmox-shared-memory.workspace = true
 -proxmox-sortable-macro.workspace = true
 -proxmox-subscription.workspace = true
+-proxmox-syslog-api.workspace = true
 -proxmox-sys = { workspace = true, features = [ "timer" ] }
 -proxmox-systemd.workspace = true
 -proxmox-tfa.workspace = true
@@ -141,16 +117,10 @@ index 4b1671ea..086de77a 100644
 -pbs-tools.workspace = true
 -proxmox-rrd.workspace = true
 -proxmox-rrd-api-types.workspace = true
--
- # Local path overrides
- # NOTE: You must run `cargo update` after changing this for it to take effect!
- [patch.crates-io]
+@@ -282 +177 @@ proxmox-rrd-api-types.workspace = true
 -#pbs-api-types = { path = "../proxmox/pbs-api-types" }
 +pbs-api-types = { path = "../proxmox/pbs-api-types" }
- #proxmox-acme = { path = "../proxmox/proxmox-acme" }
- #proxmox-acme-api = { path = "../proxmox/proxmox-acme-api" }
- #proxmox-api-macro = { path = "../proxmox/proxmox-api-macro" }
- #proxmox-apt = { path = "../proxmox/proxmox-apt" }
+@@ -287,7 +182,7 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-apt-api-types = { path = "../proxmox/proxmox-apt-api-types" }
 -#proxmox-async = { path = "../proxmox/proxmox-async" }
 -#proxmox-auth-api = { path = "../proxmox/proxmox-auth-api" }
@@ -165,8 +135,7 @@ index 4b1671ea..086de77a 100644
 +proxmox-borrow = { path = "../proxmox/proxmox-borrow" }
 +proxmox-compression = { path = "../proxmox/proxmox-compression" }
 +proxmox-config-digest = { path = "../proxmox/proxmox-config-digest" }
- #proxmox-daemon = { path = "../proxmox/proxmox-daemon" }
- #proxmox-docgen = { path = "../proxmox/proxmox-docgen" }
+@@ -296,5 +191,5 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-http = { path = "../proxmox/proxmox-http" }
 -#proxmox-http-error = { path = "../proxmox/proxmox-http-error" }
 -#proxmox-human-byte = { path = "../proxmox/proxmox-human-byte" }
@@ -177,58 +146,50 @@ index 4b1671ea..086de77a 100644
 +proxmox-human-byte = { path = "../proxmox/proxmox-human-byte" }
 +proxmox-io = { path = "../proxmox/proxmox-io" }
 +proxmox-lang = { path = "../proxmox/proxmox-lang" }
- #proxmox-ldap = { path = "../proxmox/proxmox-ldap" }
+@@ -302 +197 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-log = { path = "../proxmox/proxmox-log" }
 +proxmox-log = { path = "../proxmox/proxmox-log" }
- #proxmox-metrics = { path = "../proxmox/proxmox-metrics" }
- #proxmox-network-api = { path = "../proxmox/proxmox-network-api" }
- #proxmox-network-types = { path = "../proxmox/proxmox-network-types" }
+@@ -306 +201 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-notify = { path = "../proxmox/proxmox-notify" }
 +proxmox-notify = { path = "../proxmox/proxmox-notify" }
- #proxmox-openid = { path = "../proxmox/proxmox-openid" }
- #proxmox-parallel-handler = { path = "../proxmox/proxmox-parallel-handler" }
- #proxmox-product-config = { path = "../proxmox/proxmox-product-config" }
+@@ -310 +205 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-rate-limiter = { path = "../proxmox/proxmox-rate-limiter" }
 +proxmox-rate-limiter = { path = "../proxmox/proxmox-rate-limiter" }
- #proxmox-rest-server = { path = "../proxmox/proxmox-rest-server" }
+@@ -312 +207 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-router = { path = "../proxmox/proxmox-router" }
 +proxmox-router = { path = "../proxmox/proxmox-router" }
- #proxmox-rrd = { path = "../proxmox/proxmox-rrd" }
- #proxmox-rrd-api-types = { path = "../proxmox/proxmox-rrd-api-types" }
+@@ -315,3 +210,3 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-s3-client = { path = "../proxmox/proxmox-s3-client" }
-+proxmox-s3-client = { path = "../proxmox/proxmox-s3-client" }
 -#proxmox-schema = { path = "../proxmox/proxmox-schema" }
 -#proxmox-section-config = { path = "../proxmox/proxmox-section-config" }
++proxmox-s3-client = { path = "../proxmox/proxmox-s3-client" }
 +proxmox-schema = { path = "../proxmox/proxmox-schema" }
 +proxmox-section-config = { path = "../proxmox/proxmox-section-config" }
- #proxmox-sendmail = { path = "../proxmox/proxmox-sendmail" }
+@@ -319 +214 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-serde = { path = "../proxmox/proxmox-serde" }
 +proxmox-serde = { path = "../proxmox/proxmox-serde" }
- #proxmox-shared-cache = { path = "../proxmox/proxmox-shared-cache" }
+@@ -321,2 +216,2 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-shared-memory = { path = "../proxmox/proxmox-shared-memory" }
 -#proxmox-sortable-macro = { path = "../proxmox/proxmox-sortable-macro" }
 +proxmox-shared-memory = { path = "../proxmox/proxmox-shared-memory" }
 +proxmox-sortable-macro = { path = "../proxmox/proxmox-sortable-macro" }
- #proxmox-subscription = { path = "../proxmox/proxmox-subscription" }
+@@ -324,2 +219,2 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-sys = { path = "../proxmox/proxmox-sys" }
 -#proxmox-systemd = { path = "../proxmox/proxmox-systemd" }
 +proxmox-sys = { path = "../proxmox/proxmox-sys" }
 +proxmox-systemd = { path = "../proxmox/proxmox-systemd" }
- #proxmox-tfa = { path = "../proxmox/proxmox-tfa" }
+@@ -327 +222 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-time = { path = "../proxmox/proxmox-time" }
 +proxmox-time = { path = "../proxmox/proxmox-time" }
- #proxmox-upgrade-checks = { path = "../proxmox/proxmox-upgrade-checks" }
+@@ -329,2 +224,2 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-uuid = { path = "../proxmox/proxmox-uuid" }
 -#proxmox-worker-task = { path = "../proxmox/proxmox-worker-task" }
 +proxmox-uuid = { path = "../proxmox/proxmox-uuid" }
 +proxmox-worker-task = { path = "../proxmox/proxmox-worker-task" }
- 
+@@ -332,3 +227,3 @@ proxmox-rrd-api-types.workspace = true
 -#proxmox-fuse = {path = "../proxmox-fuse" }
 -#pathpatterns = {path = "../pathpatterns" }
 -#pxar = { path = "../pxar" }
 +proxmox-fuse = {path = "../proxmox-fuse" }
 +pathpatterns = {path = "../pathpatterns" }
 +pxar = { path = "../pxar" }
- 
- [features]
- default = []

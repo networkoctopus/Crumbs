@@ -7,20 +7,20 @@ the Crumbs project.
 ## Proxmox Backup Client
 
 The Flatpak builds `proxmox-backup-client` from source for each target
-architecture. The primary source is Proxmox Backup Server v4.2.0:
+architecture. The primary source is Proxmox Backup Server v4.2.3:
 
 - Source repository: <https://git.proxmox.com/git/proxmox-backup.git>
-- Git revision: `035c449897fafc228c8bbf3a5b5ba38564478ac7`
+- Git revision: `bc863d45e7fbadb3690143613ea70600535f23a1`
 - Installed path in the Flatpak: `/app/bin/proxmox-backup-client`
 - GitHub read-only mirror: <https://github.com/proxmox/proxmox-backup>
 - Upstream license declared by Proxmox: `AGPL-3`
 
 The build also uses these pinned Proxmox source repositories:
 
-- `proxmox`: `22c4d5ecbfce6eb2fd566181e0b7d23ac2df4f0c`
-- `proxmox-fuse`: `ac99ac97f7c2eb7ab9ee6ec3b41034e68b1eca7d`
+- `proxmox`: `82941eaf48e008d980fdbce82fd65dd6b4869cd9`
+- `proxmox-fuse`: `258788a3d66f7a77040a480170fff9890d4939aa`
 - `pxar`: `091a8a382d0d6fc71025351fb35c51b1f3b0074d`
-- `pathpatterns`: `5323cbe49ae5d592eb8a3fa2e215550e83dd7fba`
+- `pathpatterns`: `42e5e96e30297da878a4d4b3a7fa52b65c1be0ab`
 
 The manifest applies
 [`build-aux/pbs-client-path-dependencies.patch`](build-aux/pbs-client-path-dependencies.patch),

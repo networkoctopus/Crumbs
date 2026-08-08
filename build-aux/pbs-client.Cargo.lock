@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "pbs-api-types"
-version = "1.0.15"
+version = "1.0.18"
 dependencies = [
  "anyhow",
  "const_format",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "pbs-buildcfg"
-version = "4.2.0"
+version = "4.2.3"
 
 [[package]]
 name = "pbs-client"
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "proxmox-api-macro"
-version = "1.4.4"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "proc-macro2 1.0.107",
@@ -1742,14 +1742,13 @@ dependencies = [
 
 [[package]]
 name = "proxmox-apt-api-types"
-version = "2.0.5"
+version = "3.0.0"
 dependencies = [
  "proxmox-config-digest",
  "proxmox-schema",
  "proxmox-serde",
  "regex",
  "serde",
- "serde_plain",
 ]
 
 [[package]]
@@ -1778,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "proxmox-backup"
-version = "4.2.0"
+version = "4.2.3"
 
 [[package]]
 name = "proxmox-backup-banner"
@@ -2008,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "proxmox-router"
-version = "3.2.6"
+version = "3.2.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2069,7 +2068,7 @@ dependencies = [
 
 [[package]]
 name = "proxmox-schema"
-version = "5.1.1"
+version = "5.2.0"
 dependencies = [
  "anyhow",
  "const_format",
