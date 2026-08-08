@@ -2,7 +2,9 @@ name: Flatpak
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "automation/pbs-client-*"
     tags: ["v*"]
     paths-ignore:
       - "README.md"
@@ -27,19 +29,37 @@ env:
 
 jobs:
   build:
-    name: Build Flatpak
-    runs-on: ubuntu-latest
-    outputs:
-      signed: ${{ steps.gpg.outputs.signed }}
+    name: Build Flatpak (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            elf_machine: Advanced Micro Devices X86-64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            elf_machine: AArch64
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Check out sources
         uses: actions/checkout@v4
 
+      - name: Read release versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          source build-aux/pbs-client.env
+          crumbs_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "pbs=${PBS_CLIENT_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "bundle=Crumbs-${crumbs_version}-PBS-Client-${PBS_CLIENT_VERSION}-${{ matrix.arch }}" >> "${GITHUB_OUTPUT}"
+
       - name: Install Flatpak tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y dbus-x11 flatpak flatpak-builder gpg
+          sudo apt-get install -y binutils dbus-x11 flatpak flatpak-builder gpg
 
       - name: Add Flathub
         run: |
@@ -64,7 +84,7 @@ jobs:
 
           if [[ -z "${FLATPAK_GPG_PRIVATE_KEY}" || -z "${FLATPAK_GPG_KEY_ID}" ]]; then
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "No Flatpak GPG signing secrets configured; building an unsigned repo artifact."
+            echo "No Flatpak GPG signing secrets configured; building an unsigned repository."
             exit 0
           fi
 
@@ -91,7 +111,7 @@ jobs:
 
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Build repository
+      - name: Build architecture repository
         shell: bash
         env:
           FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
@@ -106,6 +126,7 @@ jobs:
 
           dbus-run-session -- flatpak-builder \
             --user \
+            --arch="${{ matrix.arch }}" \
             --force-clean \
             --install-deps-from=flathub \
             --repo=repo \
@@ -113,11 +134,160 @@ jobs:
             build-dir \
             "${MANIFEST}"
 
-          if [[ "${SIGNED}" == "true" ]]; then
-            flatpak build-update-repo --gpg-sign="${FLATPAK_GPG_KEY_ID}" repo
-          else
-            flatpak build-update-repo repo
+      - name: Verify architecture and PBS startup
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          EXPECTED_ELF_MACHINE: ${{ matrix.elf_machine }}
+        run: |
+          set -euo pipefail
+
+          test "$(flatpak --default-arch)" = "${EXPECTED_ARCH}"
+
+          for binary in crumbs proxmox-backup-client; do
+            readelf -h "build-dir/files/bin/${binary}" | grep -F "Machine:" | grep -F "${EXPECTED_ELF_MACHINE}"
+          done
+
+          test -e build-dir/files/lib/libfuse3.so.3
+          find build-dir/files/lib -maxdepth 1 -name 'libfuse3.so*' -ls
+
+          readelf -d build-dir/files/bin/proxmox-backup-client | tee pbs-dynamic.txt
+          expected_runpath="\$ORIGIN/../lib"
+          grep -F "${expected_runpath}" pbs-dynamic.txt
+
+          dbus-run-session -- flatpak-builder \
+            --run \
+            --arch="${EXPECTED_ARCH}" \
+            build-dir \
+            "${MANIFEST}" \
+            ldd /app/bin/proxmox-backup-client | tee pbs-ldd.txt
+          if grep -F "not found" pbs-ldd.txt; then
+            exit 1
           fi
+
+          dbus-run-session -- flatpak-builder \
+            --run \
+            --arch="${EXPECTED_ARCH}" \
+            build-dir \
+            "${MANIFEST}" \
+            /app/bin/proxmox-backup-client version | tee pbs-version.txt
+          source build-aux/pbs-client.env
+          grep -F "client version: ${PBS_CLIENT_VERSION}" pbs-version.txt
+
+      - name: Build architecture bundle
+        run: |
+          flatpak build-bundle \
+            --arch="${{ matrix.arch }}" \
+            repo \
+            "${{ steps.versions.outputs.bundle }}.flatpak" \
+            "${APP_ID}" \
+            master
+
+      - name: Archive architecture repository
+        run: |
+          tar -C repo -czf "repo-${{ matrix.arch }}.tar.gz" .
+
+      - name: Upload Flatpak bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.versions.outputs.bundle }}
+          path: ${{ steps.versions.outputs.bundle }}.flatpak
+
+      - name: Upload architecture repository
+        uses: actions/upload-artifact@v4
+        with:
+          name: crumbs-flatpak-repository-${{ matrix.arch }}
+          path: repo-${{ matrix.arch }}.tar.gz
+
+  assemble:
+    name: Assemble multi-architecture repository
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Install repository tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak gpg ostree
+
+      - name: Download architecture repositories
+        uses: actions/download-artifact@v4
+        with:
+          pattern: crumbs-flatpak-repository-*
+          path: architecture-repos
+          merge-multiple: true
+
+      - name: Merge architecture repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p repo arm-repo
+          tar -xzf architecture-repos/repo-x86_64.tar.gz -C repo
+          tar -xzf architecture-repos/repo-aarch64.tar.gz -C arm-repo
+
+          while IFS= read -r ref; do
+            ostree --repo=repo pull-local arm-repo "${ref}"
+          done < <(ostree --repo=arm-repo refs)
+
+          ostree --repo=repo refs | sort
+
+      - name: Import GPG signing key
+        id: gpg
+        shell: bash
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          FLATPAK_GPG_PASSPHRASE: ${{ secrets.FLATPAK_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${FLATPAK_GPG_PRIVATE_KEY}" || -z "${FLATPAK_GPG_KEY_ID}" ]]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No Flatpak GPG signing secrets configured; assembling an unsigned repository."
+            exit 0
+          fi
+
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          printf 'allow-loopback-pinentry\n' > ~/.gnupg/gpg-agent.conf
+          printf 'batch\nno-tty\npinentry-mode loopback\n' > ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
+
+          printf '%s' "${FLATPAK_GPG_PRIVATE_KEY}" | gpg --batch --import
+          gpg --batch --list-secret-keys "${FLATPAK_GPG_KEY_ID}"
+
+          if [[ -n "${FLATPAK_GPG_PASSPHRASE}" ]]; then
+            printf 'crumbs signing probe' > /tmp/crumbs-signing-probe
+            gpg \
+              --batch \
+              --yes \
+              --pinentry-mode loopback \
+              --passphrase "${FLATPAK_GPG_PASSPHRASE}" \
+              --local-user "${FLATPAK_GPG_KEY_ID}" \
+              --detach-sign \
+              /tmp/crumbs-signing-probe
+          fi
+
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update repository metadata
+        shell: bash
+        env:
+          FLATPAK_GPG_KEY_ID: ${{ secrets.FLATPAK_GPG_KEY_ID }}
+          SIGNED: ${{ steps.gpg.outputs.signed }}
+        run: |
+          set -euo pipefail
+
+          update_args=(--generate-static-deltas --prune)
+          if [[ "${SIGNED}" == "true" ]]; then
+            update_args+=(--gpg-sign="${FLATPAK_GPG_KEY_ID}")
+          fi
+
+          flatpak build-update-repo "${update_args[@]}" repo
 
       - name: Generate flatpakrepo file
         shell: bash
@@ -127,7 +297,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          repo_url="${FLATPAK_REPO_URL}"
           gpg_key=""
           no_gpg_verify="true"
 
@@ -139,25 +308,16 @@ jobs:
           python3 build-aux/render-flatpakrepo.py \
             --template build-aux/io.github.networkoctopus.Crumbs.flatpakrepo.in \
             --output "repo/${FLATPAKREPO_FILE}" \
-            --repo-url "${repo_url}" \
+            --repo-url "${FLATPAK_REPO_URL}" \
             --gpg-key "${gpg_key}" \
             --no-gpg-verify "${no_gpg_verify}"
 
-      - name: Build single-file bundle
-        run: |
-          flatpak build-bundle repo "${APP_ID}.flatpak" "${APP_ID}" master
-
-      - name: Upload Flatpak bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: crumbs-flatpak-bundle
-          path: ${{ env.APP_ID }}.flatpak
-
-      - name: Upload Flatpak repo artifact
+      - name: Upload multi-architecture repository
         uses: actions/upload-artifact@v4
         with:
           name: networkoctopus-flatpak-repo
           path: repo
+          include-hidden-files: true
 
       - name: Publish shared networkoctopus Flatpak repository
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && steps.gpg.outputs.signed == 'true'

@@ -1,0 +1,107 @@
+name: Update stable PBS client
+
+on:
+  schedule:
+    - cron: "23 6 * * 2"
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: docker
+    container: ubuntu:24.04
+
+    steps:
+      - name: Install update tooling
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl dpkg-dev git gnupg gzip python3
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          ln -s /root/.cargo/bin/cargo /usr/local/bin/cargo
+          ln -s /root/.cargo/bin/rustc /usr/local/bin/rustc
+
+      - name: Check out Crumbs
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare stable PBS client update
+        run: build-aux/update-pbs-client.sh
+
+      - name: Open or refresh Forgejo pull request
+        shell: bash
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+          FORGEJO_API_URL: ${{ github.api_url }}
+          FORGEJO_REPOSITORY: ${{ github.repository }}
+          FORGEJO_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "No stable PBS client update is available."
+            exit 0
+          fi
+
+          # shellcheck source=build-aux/pbs-client.env
+          source build-aux/pbs-client.env
+          branch="automation/pbs-client-${PBS_CLIENT_VERSION}"
+
+          git config user.name "${FORGEJO_ACTOR} via Forgejo Actions"
+          git config user.email "${FORGEJO_ACTOR}@users.noreply.git.networkoctopus.com"
+          git checkout -B "${branch}"
+          git add \
+            THIRD_PARTY_NOTICES.md \
+            build-aux/pbs-client.env \
+            build-aux/pbs-client-path-dependencies.patch \
+            build-aux/pbs-client.Cargo.lock \
+            data/io.github.networkoctopus.Crumbs.metainfo.xml \
+            io.github.networkoctopus.Crumbs.Devel.yml
+          git commit -m "Update PBS client to ${PBS_CLIENT_VERSION}"
+          git push --force-with-lease origin "HEAD:refs/heads/${branch}"
+
+          export PR_BRANCH="${branch}"
+          export PR_VERSION="${PBS_CLIENT_VERSION}"
+          export PR_DEBIAN_VERSION="${PBS_CLIENT_DEBIAN_VERSION}"
+
+          pulls=$(curl -fsSL \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            "${FORGEJO_API_URL}/repos/${FORGEJO_REPOSITORY}/pulls?state=open&limit=50")
+          if printf '%s' "${pulls}" | python3 -c '
+          import json, os, sys
+          branch = os.environ["PR_BRANCH"]
+          pulls = json.load(sys.stdin)
+          raise SystemExit(0 if any(pr.get("head", {}).get("ref") == branch for pr in pulls) else 1)
+          '; then
+            echo "An open pull request already tracks ${branch}."
+            exit 0
+          fi
+
+          pr_payload=$(mktemp)
+          python3 - "${pr_payload}" <<'PY'
+          import json
+          import os
+          import sys
+
+          payload = {
+              "base": "main",
+              "head": os.environ["PR_BRANCH"],
+              "title": f"Update PBS client to {os.environ['PR_VERSION']}",
+              "body": (
+                  f"Updates the bundled Proxmox Backup Client to the latest stable "
+                  f"client-only repository release, `{os.environ['PR_DEBIAN_VERSION']}`.\n\n"
+                  "The source commits and Cargo lockfile were regenerated together. "
+                  "The mirrored update branch is built for x86_64 and aarch64 by GitHub Actions."
+              ),
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as output:
+              json.dump(payload, output)
+          PY
+
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: token ${FORGEJO_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary "@${pr_payload}" \
+            "${FORGEJO_API_URL}/repos/${FORGEJO_REPOSITORY}/pulls"

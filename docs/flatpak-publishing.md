@@ -57,8 +57,10 @@ repository; the repository identity is not app-specific.
 
 4. Push to `main`.
 
-   The `Flatpak` workflow will build the app, sign the repository, upload build
-   artifacts, and deploy the repository to GitHub Pages.
+   The `Flatpak` workflow will build native `x86_64` and `aarch64` versions from
+   the same manifest, verify both binaries, combine and sign their architecture
+   repositories, upload build artifacts, and deploy the combined repository to
+   GitHub Pages.
 
 ## Installing from the GitHub Pages Flatpak repo
 
@@ -85,10 +87,10 @@ flatpak update --user io.github.networkoctopus.Crumbs
 
 ## Local unsigned artifacts
 
-Pull requests and runs without signing secrets still build an unsigned Flatpak
-repository artifact and a single `.flatpak` bundle. Those artifacts are useful
-for CI validation, but the public GitHub Pages remote is only deployed when the
-GPG key secrets are present.
+Pull requests and runs without signing secrets still build an unsigned combined
+Flatpak repository artifact and separate `x86_64` and `aarch64` `.flatpak`
+bundles. Those artifacts are useful for CI validation, but the public GitHub
+Pages remote is only deployed from `main` when the GPG key secrets are present.
 
 ## Current caveat
 
