@@ -26,6 +26,14 @@ use std::time::Duration;
 
 const APP_ID: &str = "io.github.networkoctopus.Crumbs";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const PBS_CLIENT_PINS: &str = include_str!("../build-aux/pbs-client.env");
+
+fn bundled_pbs_client_version() -> &'static str {
+    PBS_CLIENT_PINS
+        .lines()
+        .find_map(|line| line.strip_prefix("PBS_CLIENT_VERSION="))
+        .unwrap_or("unknown")
+}
 
 pub fn run() -> glib::ExitCode {
     let application = adw::Application::builder().application_id(APP_ID).build();
@@ -315,18 +323,19 @@ fn primary_menu_button() -> gtk::MenuButton {
 }
 
 fn show_about_dialog(parent: Option<&gtk::Window>) {
-    let dialog = gtk::AboutDialog::builder()
-        .modal(true)
-        .program_name("Crumbs")
-        .version(APP_VERSION)
+    let version = format!(
+        "{APP_VERSION} · Proxmox Backup Client {}",
+        bundled_pbs_client_version()
+    );
+    let dialog = adw::AboutDialog::builder()
+        .application_name("Crumbs")
+        .application_icon(APP_ID)
+        .version(version)
         .comments("Back up your personal files to Proxmox Backup Server")
         .website("https://github.com/networkoctopus/Crumbs")
-        .website_label("Crumbs on GitHub")
-        .logo_icon_name(APP_ID)
         .build();
 
-    dialog.set_transient_for(parent);
-    dialog.present();
+    dialog.present(parent);
 }
 
 fn build_ui(application: &adw::Application) {
@@ -664,7 +673,7 @@ fn build_ui(application: &adw::Application) {
 
     let restore_destination = adw::EntryRow::builder()
         .title("Restore Destination")
-        .text(default_restore_destination())
+        .editable(false)
         .build();
     let restore_destination_button = folder_button("Choose Restore Destination");
     let restore_destination_path = Rc::new(RefCell::new(None));
@@ -3440,14 +3449,6 @@ fn default_server_name() -> String {
 
 fn default_source() -> String {
     glib::home_dir().to_string_lossy().into_owned()
-}
-
-fn default_restore_destination() -> String {
-    glib::home_dir()
-        .join("Downloads")
-        .join("CrumbsRestored")
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn default_backup_id() -> String {

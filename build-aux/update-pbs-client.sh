@@ -6,6 +6,7 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PINS_FILE="${ROOT_DIR}/build-aux/pbs-client.env"
 MANIFEST="${ROOT_DIR}/io.github.networkoctopus.Crumbs.Devel.yml"
 PATCH_FILE="${ROOT_DIR}/build-aux/pbs-client-path-dependencies.patch"
+PAGE_SIZE_PATCH_FILE="${ROOT_DIR}/build-aux/pbs-client-page-size.patch"
 LOCK_FILE="${ROOT_DIR}/build-aux/pbs-client.Cargo.lock"
 METAINFO="${ROOT_DIR}/data/io.github.networkoctopus.Crumbs.metainfo.xml"
 THIRD_PARTY_NOTICES="${ROOT_DIR}/THIRD_PARTY_NOTICES.md"
@@ -169,6 +170,12 @@ if [[ "${CHANGELOG_VERSION}" != "${LATEST_DEBIAN_VERSION}" ]]; then
     echo "PBS commit ${NEW_PBS_BACKUP_COMMIT} identifies as ${CHANGELOG_VERSION}, not ${LATEST_DEBIAN_VERSION}." >&2
     exit 1
 fi
+
+# Keep the downstream index-reader fix explicit. If Proxmox changes these
+# readers (or incorporates an equivalent fix), fail the update rather than
+# silently publishing an unpatched client.
+patch --forward --fuzz=0 --strip=1 --directory="${SOURCE_ROOT}/proxmox-backup" \
+    --input="${PAGE_SIZE_PATCH_FILE}"
 
 echo "Regenerating the dependency-routing patch and Cargo lockfile..."
 python3 - "${SOURCE_ROOT}/proxmox-backup/Cargo.toml" <<'PY'

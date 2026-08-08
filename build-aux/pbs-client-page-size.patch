@@ -1,0 +1,232 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Crumbs contributors <noreply@git.networkoctopus.com>
+Subject: [PATCH] datastore: read indexes on systems with larger page sizes
+
+The index format uses a fixed 4096-byte header, but mmap offsets must be
+aligned to the running kernel's page size. Map the whole file from offset zero
+so readers also work on 16 KiB and 64 KiB kernels.
+---
+diff --git a/pbs-datastore/src/dynamic_index.rs b/pbs-datastore/src/dynamic_index.rs
+index a0d9369..88a53e8 100644
+--- a/pbs-datastore/src/dynamic_index.rs
++++ b/pbs-datastore/src/dynamic_index.rs
+@@ -77,7 +77,7 @@ impl DynamicEntry {
+ pub struct DynamicIndexReader {
+     _file: File,
+     pub size: usize,
+-    index: Mmap<DynamicEntry>,
++    memory: Mmap<u8>,
+     pub uuid: [u8; 16],
+     pub ctime: i64,
+     pub index_csum: [u8; 32],
+@@ -92,7 +92,14 @@ impl DynamicIndexReader {
+     }
+ 
+     pub fn index(&self) -> &[DynamicEntry] {
+-        &self.index
++        let header_size = std::mem::size_of::<DynamicIndexHeader>();
++        let index_size = self.size - header_size;
++        unsafe {
++            std::slice::from_raw_parts(
++                self.memory.as_ptr().add(header_size).cast::<DynamicEntry>(),
++                index_size / std::mem::size_of::<DynamicEntry>(),
++            )
++        }
+     }
+ 
+     pub fn new(mut file: std::fs::File) -> Result<Self, Error> {
+@@ -125,11 +132,14 @@ impl DynamicIndexReader {
+             bail!("got unexpected file size");
+         }
+ 
+-        let index = unsafe {
++        // Map from offset zero because mmap offsets must be aligned to the
++        // system page size. The on-disk header is always 4096 bytes, which is
++        // not a valid mmap offset on systems using 16 KiB or 64 KiB pages.
++        let memory = unsafe {
+             Mmap::map_fd(
+                 &file,
+-                header_size as u64,
+-                index_count,
++                0,
++                size,
+                 nix::sys::mman::ProtFlags::PROT_READ,
+                 nix::sys::mman::MapFlags::MAP_PRIVATE,
+             )?
+@@ -138,7 +148,7 @@ impl DynamicIndexReader {
+         Ok(Self {
+             _file: file,
+             size,
+-            index,
++            memory,
+             ctime: i64::from_le(header.ctime),
+             uuid: header.uuid,
+             index_csum: header.index_csum,
+@@ -147,18 +157,18 @@ impl DynamicIndexReader {
+ 
+     #[inline]
+     pub fn chunk_end(&self, pos: usize) -> u64 {
+-        if pos >= self.index.len() {
++        if pos >= self.index().len() {
+             panic!("chunk index out of range");
+         }
+-        self.index[pos].end()
++        self.index()[pos].end()
+     }
+ 
+     #[inline]
+     fn chunk_digest(&self, pos: usize) -> &[u8; 32] {
+-        if pos >= self.index.len() {
++        if pos >= self.index().len() {
+             panic!("chunk index out of range");
+         }
+-        &self.index[pos].digest
++        &self.index()[pos].digest
+     }
+ 
+     pub fn binary_search(
+@@ -189,11 +199,11 @@ impl DynamicIndexReader {
+ 
+ impl IndexFile for DynamicIndexReader {
+     fn index_count(&self) -> usize {
+-        self.index.len()
++        self.index().len()
+     }
+ 
+     fn index_digest(&self, pos: usize) -> Option<&[u8; 32]> {
+-        if pos >= self.index.len() {
++        if pos >= self.index().len() {
+             None
+         } else {
+             Some(self.chunk_digest(pos))
+@@ -201,10 +211,10 @@ impl IndexFile for DynamicIndexReader {
+     }
+ 
+     fn index_bytes(&self) -> u64 {
+-        if self.index.is_empty() {
++        if self.index().is_empty() {
+             0
+         } else {
+-            self.chunk_end(self.index.len() - 1)
++            self.chunk_end(self.index().len() - 1)
+         }
+     }
+ 
+@@ -222,20 +232,20 @@ impl IndexFile for DynamicIndexReader {
+     }
+ 
+     fn chunk_info(&self, pos: usize) -> Option<ChunkReadInfo> {
+-        if pos >= self.index.len() {
++        if pos >= self.index().len() {
+             return None;
+         }
+         let start = if pos == 0 {
+             0
+         } else {
+-            self.index[pos - 1].end()
++            self.index()[pos - 1].end()
+         };
+ 
+-        let end = self.index[pos].end();
++        let end = self.index()[pos].end();
+ 
+         Some(ChunkReadInfo {
+             range: start..end,
+-            digest: self.index[pos].digest,
++            digest: self.index()[pos].digest,
+         })
+     }
+ 
+@@ -248,7 +258,7 @@ impl IndexFile for DynamicIndexReader {
+     }
+ 
+     fn chunk_from_offset(&self, offset: u64) -> Option<(usize, u64)> {
+-        let end_idx = self.index.len() - 1;
++        let end_idx = self.index().len() - 1;
+         let end = self.chunk_end(end_idx);
+         let found_idx = self.binary_search(0, 0, end_idx, end, offset);
+         let found_idx = match found_idx {
+diff --git a/pbs-datastore/src/fixed_index.rs b/pbs-datastore/src/fixed_index.rs
+index b516bad..56e49af 100644
+--- a/pbs-datastore/src/fixed_index.rs
++++ b/pbs-datastore/src/fixed_index.rs
+@@ -33,7 +33,7 @@ pub struct FixedIndexReader {
+     pub chunk_size: usize,
+     pub size: u64,
+     index_length: usize,
+-    index: *mut u8,
++    memory: *mut u8,
+     pub uuid: [u8; 16],
+     pub ctime: i64,
+     pub index_csum: [u8; 32],
+@@ -100,18 +100,23 @@ impl FixedIndexReader {
+                 expected_index_size
+             );
+         }
++        if index_size == 0 {
++            bail!("invalid index size");
++        }
+ 
+         let chunk_size = usize::try_from(chunk_size)?;
+ 
+-        let data = unsafe {
++        // Map from offset zero because mmap offsets must be aligned to the
++        // system page size. The on-disk header is always 4096 bytes, which is
++        // not a valid mmap offset on systems using 16 KiB or 64 KiB pages.
++        let memory = unsafe {
+             nix::sys::mman::mmap(
+                 None,
+-                std::num::NonZeroUsize::new(index_size)
+-                    .ok_or_else(|| format_err!("invalid index size"))?,
++                std::num::NonZeroUsize::new(stat.st_size as usize).unwrap(),
+                 nix::sys::mman::ProtFlags::PROT_READ,
+                 nix::sys::mman::MapFlags::MAP_PRIVATE,
+                 &file,
+-                header_size as i64,
++                0,
+             )
+         }?
+         .as_ptr()
+@@ -122,7 +127,7 @@ impl FixedIndexReader {
+             chunk_size,
+             size,
+             index_length,
+-            index: data,
++            memory,
+             ctime,
+             uuid: header.uuid,
+             index_csum: header.index_csum,
+@@ -130,17 +135,17 @@ impl FixedIndexReader {
+     }
+ 
+     fn unmap(&mut self) -> Result<(), Error> {
+-        let Some(index) = NonNull::new(self.index as *mut std::ffi::c_void) else {
++        let Some(memory) = NonNull::new(self.memory as *mut std::ffi::c_void) else {
+             return Ok(());
+         };
+ 
+-        let index_size = self.index_length * 32;
++        let mapped_size = std::mem::size_of::<FixedIndexHeader>() + self.index_length * 32;
+ 
+-        if let Err(err) = unsafe { nix::sys::mman::munmap(index, index_size) } {
++        if let Err(err) = unsafe { nix::sys::mman::munmap(memory, mapped_size) } {
+             bail!("unmap file failed - {}", err);
+         }
+ 
+-        self.index = std::ptr::null_mut();
++        self.memory = std::ptr::null_mut();
+ 
+         Ok(())
+     }
+@@ -155,7 +160,10 @@ impl IndexFile for FixedIndexReader {
+         if pos >= self.index_length {
+             None
+         } else {
+-            Some(unsafe { &*(self.index.add(pos * 32) as *const [u8; 32]) })
++            let header_size = std::mem::size_of::<FixedIndexHeader>();
++            Some(unsafe {
++                &*(self.memory.add(header_size + pos * 32) as *const [u8; 32])
++            })
+         }
+     }
+ 

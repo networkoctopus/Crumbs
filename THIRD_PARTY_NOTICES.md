@@ -32,6 +32,13 @@ dependency locations, not backup-client behaviour. The resolved Rust
 dependency set is pinned in
 [`build-aux/pbs-client.Cargo.lock`](build-aux/pbs-client.Cargo.lock).
 
+The manifest also applies
+[`build-aux/pbs-client-page-size.patch`](build-aux/pbs-client-page-size.patch),
+a Crumbs downstream portability fix which maps PBS index files from offset zero.
+This preserves the on-disk format while allowing the client to read indexes on
+Linux kernels with 4 KiB, 16 KiB, or 64 KiB pages. The stable-update workflow
+requires this patch to apply cleanly to each newly pinned PBS source revision.
+
 The GNU Affero General Public License version 3 text is included at
 [LICENSES/AGPL-3.0.txt](LICENSES/AGPL-3.0.txt).
 
