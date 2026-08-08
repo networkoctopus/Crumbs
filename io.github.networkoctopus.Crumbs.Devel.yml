@@ -48,7 +48,7 @@ modules:
     build-options:
       env:
         LIBRARY_PATH: /app/lib
-        REPOID: 035c449897fafc228c8bbf3a5b5ba38564478ac7
+        REPOID: bc863d45e7fbadb3690143613ea70600535f23a1
         RUSTFLAGS: -C link-arg=-Wl,-rpath,$ORIGIN/../lib
     build-commands:
       - patch --forward --strip=1 --directory=proxmox-backup --input="$PWD/pbs-client-path-dependencies.patch"
@@ -57,15 +57,15 @@ modules:
     sources:
       - type: git
         url: https://git.proxmox.com/git/proxmox-backup.git
-        commit: 035c449897fafc228c8bbf3a5b5ba38564478ac7
+        commit: bc863d45e7fbadb3690143613ea70600535f23a1
         dest: proxmox-backup
       - type: git
         url: https://git.proxmox.com/git/proxmox.git
-        commit: 22c4d5ecbfce6eb2fd566181e0b7d23ac2df4f0c
+        commit: 82941eaf48e008d980fdbce82fd65dd6b4869cd9
         dest: proxmox
       - type: git
         url: https://git.proxmox.com/git/proxmox-fuse.git
-        commit: ac99ac97f7c2eb7ab9ee6ec3b41034e68b1eca7d
+        commit: 258788a3d66f7a77040a480170fff9890d4939aa
         dest: proxmox-fuse
       - type: git
         url: https://git.proxmox.com/git/pxar.git
@@ -73,7 +73,7 @@ modules:
         dest: pxar
       - type: git
         url: https://git.proxmox.com/git/pathpatterns.git
-        commit: 5323cbe49ae5d592eb8a3fa2e215550e83dd7fba
+        commit: 42e5e96e30297da878a4d4b3a7fa52b65c1be0ab
         dest: pathpatterns
       - type: file
         path: build-aux/pbs-client-path-dependencies.patch
