@@ -27,6 +27,7 @@ modules:
   - name: libfuse
     buildsystem: meson
     config-opts:
+      - --libdir=/app/lib
       - -Dutils=false
       - -Dexamples=false
       - -Dtests=false
