@@ -15,7 +15,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl dpkg-dev git gnupg gzip python3
+            ca-certificates curl dpkg-dev git gnupg gzip nodejs python3
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain stable
           ln -s /root/.cargo/bin/cargo /usr/local/bin/cargo
