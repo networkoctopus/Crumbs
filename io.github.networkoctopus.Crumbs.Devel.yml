@@ -48,6 +48,7 @@ modules:
       env:
         LIBRARY_PATH: /app/lib
         REPOID: 035c449897fafc228c8bbf3a5b5ba38564478ac7
+        RUSTFLAGS: -C link-arg=-Wl,-rpath,$ORIGIN/../lib
     build-commands:
       - patch --forward --strip=1 --directory=proxmox-backup --input="$PWD/pbs-client-path-dependencies.patch"
       - cargo build --locked --release --manifest-path=proxmox-backup/Cargo.toml --package=proxmox-backup-client --bin=proxmox-backup-client

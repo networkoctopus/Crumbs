@@ -136,13 +136,12 @@ jobs:
             readelf -h "build-dir/files/bin/${binary}" | grep -F "Machine:" | grep -F "${EXPECTED_ELF_MACHINE}"
           done
 
-          dbus-run-session -- flatpak-builder \
-            --run \
-            --arch="${EXPECTED_ARCH}" \
-            build-dir \
-            "${MANIFEST}" \
-            /app/bin/proxmox-backup-client version | tee pbs-version.txt
-          grep -F "client version: 4.2.0" pbs-version.txt
+          test -e build-dir/files/lib/libfuse3.so.3
+          find build-dir/files/lib -maxdepth 1 -name 'libfuse3.so*' -ls
+
+          readelf -d build-dir/files/bin/proxmox-backup-client | tee pbs-dynamic.txt
+          expected_runpath="\$ORIGIN/../lib"
+          grep -F "${expected_runpath}" pbs-dynamic.txt
 
           dbus-run-session -- flatpak-builder \
             --run \
@@ -150,7 +149,17 @@ jobs:
             build-dir \
             "${MANIFEST}" \
             ldd /app/bin/proxmox-backup-client | tee pbs-ldd.txt
-          ! grep -F "not found" pbs-ldd.txt
+          if grep -F "not found" pbs-ldd.txt; then
+            exit 1
+          fi
+
+          dbus-run-session -- flatpak-builder \
+            --run \
+            --arch="${EXPECTED_ARCH}" \
+            build-dir \
+            "${MANIFEST}" \
+            /app/bin/proxmox-backup-client version | tee pbs-version.txt
+          grep -F "client version: 4.2.0" pbs-version.txt
 
       - name: Build architecture bundle
         run: |
