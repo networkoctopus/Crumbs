@@ -50,6 +50,7 @@
     <release version="0.1.0" date="2026-08-05">
       <description>
         <p>Initial development Flatpak repository build.</p>
+        <p>Bundles Proxmox Backup Client 4.2.0.</p>
       </description>
     </release>
   </releases>

@@ -24,12 +24,12 @@ The build also uses these pinned Proxmox source repositories:
 
 The manifest applies
 [`build-aux/pbs-client-path-dependencies.patch`](build-aux/pbs-client-path-dependencies.patch),
-originally published by the Arch User Repository package maintainers, to route
-Proxmox crates that are unavailable on crates.io to the sibling source trees.
-Its upstream SHA-256 is
-`8d9198b3d8560659fca2e964b74f896f892d5709030b297cc99d64eb406f11ec`.
-The patch changes dependency locations, not backup-client behaviour. The
-resolved Rust dependency set is pinned in
+derived from dependency-routing changes originally published by the Arch User
+Repository package maintainers, to route Proxmox crates that are unavailable
+on crates.io to the sibling source trees. The stable-update workflow
+regenerates the patch for the exact pinned PBS source revision. It changes
+dependency locations, not backup-client behaviour. The resolved Rust
+dependency set is pinned in
 [`build-aux/pbs-client.Cargo.lock`](build-aux/pbs-client.Cargo.lock).
 
 The GNU Affero General Public License version 3 text is included at

@@ -2,7 +2,9 @@ name: Flatpak
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "automation/pbs-client-*"
     tags: ["v*"]
     paths-ignore:
       - "README.md"
@@ -43,6 +45,16 @@ jobs:
     steps:
       - name: Check out sources
         uses: actions/checkout@v4
+
+      - name: Read release versions
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          source build-aux/pbs-client.env
+          crumbs_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "pbs=${PBS_CLIENT_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "bundle=Crumbs-${crumbs_version}-PBS-Client-${PBS_CLIENT_VERSION}-${{ matrix.arch }}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Flatpak tooling
         run: |
@@ -159,14 +171,15 @@ jobs:
             build-dir \
             "${MANIFEST}" \
             /app/bin/proxmox-backup-client version | tee pbs-version.txt
-          grep -F "client version: 4.2.0" pbs-version.txt
+          source build-aux/pbs-client.env
+          grep -F "client version: ${PBS_CLIENT_VERSION}" pbs-version.txt
 
       - name: Build architecture bundle
         run: |
           flatpak build-bundle \
             --arch="${{ matrix.arch }}" \
             repo \
-            "${APP_ID}-${{ matrix.arch }}.flatpak" \
+            "${{ steps.versions.outputs.bundle }}.flatpak" \
             "${APP_ID}" \
             master
 
@@ -177,8 +190,8 @@ jobs:
       - name: Upload Flatpak bundle
         uses: actions/upload-artifact@v4
         with:
-          name: crumbs-flatpak-bundle-${{ matrix.arch }}
-          path: ${{ env.APP_ID }}-${{ matrix.arch }}.flatpak
+          name: ${{ steps.versions.outputs.bundle }}
+          path: ${{ steps.versions.outputs.bundle }}.flatpak
 
       - name: Upload architecture repository
         uses: actions/upload-artifact@v4
