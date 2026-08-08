@@ -24,21 +24,67 @@ finish-args:
   - --talk-name=org.freedesktop.secrets
 
 modules:
+  - name: libfuse
+    buildsystem: meson
+    config-opts:
+      - -Dutils=false
+      - -Dexamples=false
+      - -Dtests=false
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+    post-install:
+      - install -Dm644 ../LICENSE /app/share/doc/crumbs/libfuse/LICENSE
+      - install -Dm644 ../LGPL2.txt /app/share/doc/crumbs/libfuse/LGPL2.txt
+    sources:
+      - type: git
+        url: https://github.com/libfuse/libfuse.git
+        tag: fuse-3.16.2
+        commit: 7a92727d97c10290b3501d86a194738973edb61d
+
   - name: proxmox-backup-client
     buildsystem: simple
+    build-options:
+      env:
+        LIBRARY_PATH: /app/lib
+        REPOID: 035c449897fafc228c8bbf3a5b5ba38564478ac7
     build-commands:
-      - ar x proxmox-backup-client-static_4.2.3-1_amd64.deb
-      - tar -xf data.tar.*
-      - install -Dm755 usr/bin/proxmox-backup-client /app/bin/proxmox-backup-client
+      - patch --forward --strip=1 --directory=proxmox-backup --input="$PWD/pbs-client-path-dependencies.patch"
+      - cargo build --locked --release --manifest-path=proxmox-backup/Cargo.toml --package=proxmox-backup-client --bin=proxmox-backup-client
+      - install -Dm755 proxmox-backup/target/release/proxmox-backup-client /app/bin/proxmox-backup-client
     sources:
+      - type: git
+        url: https://git.proxmox.com/git/proxmox-backup.git
+        commit: 035c449897fafc228c8bbf3a5b5ba38564478ac7
+        dest: proxmox-backup
+      - type: git
+        url: https://git.proxmox.com/git/proxmox.git
+        commit: 22c4d5ecbfce6eb2fd566181e0b7d23ac2df4f0c
+        dest: proxmox
+      - type: git
+        url: https://git.proxmox.com/git/proxmox-fuse.git
+        commit: ac99ac97f7c2eb7ab9ee6ec3b41034e68b1eca7d
+        dest: proxmox-fuse
+      - type: git
+        url: https://git.proxmox.com/git/pxar.git
+        commit: 091a8a382d0d6fc71025351fb35c51b1f3b0074d
+        dest: pxar
+      - type: git
+        url: https://git.proxmox.com/git/pathpatterns.git
+        commit: 5323cbe49ae5d592eb8a3fa2e215550e83dd7fba
+        dest: pathpatterns
       - type: file
-        url: http://download.proxmox.com/debian/pbs-client/dists/trixie/main/binary-amd64/proxmox-backup-client-static_4.2.3-1_amd64.deb
-        sha256: 05ac991e89a6e899d3f236c15d13ba736221a44f138314f42cac22867ae46d55
+        path: build-aux/pbs-client-path-dependencies.patch
+        dest-filename: pbs-client-path-dependencies.patch
+      - type: file
+        path: build-aux/pbs-client.Cargo.lock
+        dest: proxmox-backup
+        dest-filename: Cargo.lock
 
   - name: crumbs
     buildsystem: simple
     build-commands:
-      - cargo build --release
+      - cargo build --locked --release
       - install -Dm755 target/release/crumbs /app/bin/crumbs
       - install -Dm644 data/io.github.networkoctopus.Crumbs.desktop /app/share/applications/io.github.networkoctopus.Crumbs.desktop
       - install -Dm644 data/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg /app/share/icons/hicolor/scalable/apps/io.github.networkoctopus.Crumbs.svg
@@ -48,4 +94,3 @@ modules:
     sources:
       - type: dir
         path: .
-

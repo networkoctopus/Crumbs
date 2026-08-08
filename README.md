@@ -35,17 +35,19 @@ Run the app on a system with GTK4 and libadwaita development packages:
 cargo run
 ```
 
-The Flatpak manifest is for development and temporarily permits Cargo network
-access.
+The Flatpak manifest builds both Crumbs and Proxmox Backup Client from pinned
+source revisions. The GitHub Actions workflow builds native `x86_64` and
+`aarch64` variants from the same manifest and combines them into one Flatpak
+repository. The development manifest temporarily permits Cargo network access.
 
 The provisional application ID is `io.github.networkoctopus.Crumbs`. No
 project licence has been selected yet.
 
 ## Licensing
 
-Crumbs bundles the official `proxmox-backup-client` binary in the Flatpak. That
-component is distributed under the GNU Affero General Public License version 3
-by Proxmox. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the bundled
-package version, source links, checksum, and license notice.
-
+Crumbs builds and bundles `proxmox-backup-client` as a separate executable in
+the Flatpak. That component is distributed under the GNU Affero General Public
+License version 3 by Proxmox. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for pinned source revisions,
+the build patch, and license notices.
 
